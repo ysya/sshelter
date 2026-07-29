@@ -255,6 +255,14 @@ pub fn available() -> bool {
 在 `secrets.rs` 的 `mod tests` 內追加：
 
 ```rust
+    /// 測試結束時一律嘗試刪除，避免中途 panic 把明文密碼留在開發者的真實鑰匙圈裡。
+    struct CleanupGuard<'a>(&'a str);
+    impl Drop for CleanupGuard<'_> {
+        fn drop(&mut self) {
+            let _ = delete(self.0);
+        }
+    }
+
     /// 真的碰作業系統 keychain。CI 上沒有可用的密鑰環時自動跳過。
     #[test]
     fn round_trip_set_get_delete() {
@@ -263,6 +271,8 @@ pub fn available() -> bool {
             return;
         }
         let account = "test:round-trip";
+        // 必須在 set 之前建立：斷言 panic 時 unwind 會跳過後面的 delete。
+        let _cleanup = CleanupGuard(account);
         set(account, "hunter2").expect("set ok");
         assert_eq!(get(account).unwrap().as_deref(), Some("hunter2"));
         delete(account).expect("delete ok");
