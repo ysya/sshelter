@@ -322,9 +322,19 @@ git commit -m "feat(secrets): add OS keychain wrapper for per-host passwords"
 //! 就呼叫 `run()`，完全不初始化 GUI。ssh 把提示文字當作 argv[1] 傳進來。
 //!
 //! 安全性：`SSH_ASKPASS_REQUIRE=force` 會讓「所有」提示都走這裡，包含 host key 驗證。
-//! 若無條件印出密碼，就會拿密碼去回答 host key 提示、ssh 再問一次 → 無窮迴圈；而且
-//! keyboard-interactive 的提示文字由伺服器控制，惡意主機可藉此騙走密碼。因此這裡採
-//! 白名單：只回應真正的密碼／passphrase 提示，其餘一律 exit 1 交回 ssh 正常處理。
+//! 若無條件印出密碼，就會拿密碼去回答 host key 提示、ssh 再問一次 → 無窮迴圈（已實測，
+//! 見 spike 記錄）；而且 keyboard-interactive 的提示文字由伺服器控制，惡意主機可藉此
+//! 騙走密碼。因此這裡採白名單：只回應真正的密碼／passphrase 提示。
+//!
+//! **但「拒絕」不是免費的，也不是安全的預設。** `readpass.c` 的 `read_passphrase` 在
+//! askpass 失敗時，若呼叫端沒帶 `RP_ALLOW_EOF` 就 `return xstrdup("")`，而 `sshconnect2.c`
+//! 的兩個認證呼叫點都沒帶。所以 exit 1 會讓 ssh **送出一個空密碼**，在遠端留下一筆真實
+//! 的失敗認證；只有 host key 的 `confirm()` 會把空字串當成 "no" 而安全失敗。
+//!
+//! 真正的結構性防線因此不在這個白名單，而在部署 argv 的 `-o KbdInteractiveAuthentication=no`
+//! （見 `deploy::build_deploy_argv`）：關掉之後，helper 收到的提示全部由 client 產生，
+//! 伺服器可控的文字根本進不來。**移除那個選項會讓這個白名單重新暴露在伺服器可控的輸入
+//! 之下 —— 它不是效能調校。**
 
 /// 只回應真正的密碼／passphrase 提示。
 ///
@@ -391,9 +401,10 @@ mod tests {
         // Task 0 Step 3 實測到的字串。
         assert!(prompt_is_answerable("spike@localhost's password: "));
         assert!(prompt_is_answerable("frank@10.0.0.9's password: "));
-        // PAM keyboard-interactive 常見形式。
-        assert!(prompt_is_answerable("Password: "));
-        assert!(prompt_is_answerable("password:"));
+        // keyboard-interactive：OpenSSH 8.5+ 一定帶 client 產生的 `(user@host) ` 前綴。
+        // 裸的 `Password: ` 沒有任何 ssh 路徑會產生，刻意不接受。
+        assert!(prompt_is_answerable("(frank@10.0.0.9) Password: "));
+        assert!(!prompt_is_answerable("Password: "));
     }
 
     #[test]
@@ -431,7 +442,7 @@ mod tests {
 - [ ] **Step 2: 執行測試確認通過**
 
 Run: `cd src-tauri && cargo test askpass:: -- --nocapture`
-Expected: 4 passed
+Expected: 5 passed
 
 - [ ] **Step 3: 加上密碼取得與 run() 進入點**
 
@@ -518,7 +529,7 @@ pub fn run() -> ! {
 - [ ] **Step 5: 執行測試**
 
 Run: `cd src-tauri && cargo test askpass:: -- --nocapture`
-Expected: 6 passed
+Expected: 7 passed
 
 - [ ] **Step 6: Commit**
 
@@ -1176,6 +1187,32 @@ git commit -m "feat(deploy): add host key precheck against known_hosts"
 use std::io::Write;
 use std::process::{Command, Stdio};
 
+/// 這個 alias 是否經過跳板。`ssh -G` 對 ProxyJump 會輸出 `proxyjump`，
+/// ProxyJump 也會被展開成 `proxycommand`；兩者都要擋。`none` 是明確停用的寫法。
+pub fn has_proxy(pairs: &[(String, String)]) -> bool {
+    pairs.iter().any(|(k, v)| {
+        (k.eq_ignore_ascii_case("proxyjump") || k.eq_ignore_ascii_case("proxycommand"))
+            && !v.trim().is_empty()
+            && !v.trim().eq_ignore_ascii_case("none")
+    })
+}
+
+/// 取得 alias 的 `ssh -G` key/value 對（驗證 alias 後）。
+fn effective_pairs(
+    state: &tauri::State<crate::state::AppState>,
+    alias: &str,
+) -> Result<Vec<(String, String)>, AppError> {
+    let main_path = {
+        let doc_lock = state.doc.lock().unwrap();
+        let doc = doc_lock
+            .as_ref()
+            .ok_or_else(|| AppError::Other("no config loaded".to_string()))?;
+        crate::connect::validate_alias(doc, alias)?;
+        doc.files.first().map(|f| f.path.clone())
+    };
+    crate::config::intel::effective_config(alias, main_path.as_deref())
+}
+
 /// 解析 alias 的實際連線目標（走既有的 `ssh -G` 整合）。
 fn resolve_endpoint(
     state: &tauri::State<crate::state::AppState>,
@@ -1303,6 +1340,20 @@ pub fn deploy_key(
             .ok_or_else(|| AppError::Other("no config loaded".to_string()))?;
         crate::connect::validate_alias(doc, &alias)?;
     }
+    // ProxyJump／ProxyCommand 必須「主動拒絕」，不能只是「不支援」。
+    // `SSH_ASKPASS` 與 `SSHELTER_ASKPASS_*` 會被 ProxyCommand 子進程繼承，於是跳板
+    // 主機的 `user@jump's password: ` 提示會被 helper 用「目標主機的密碼」回答 ——
+    // 那是把密碼洩漏給另一台機器。白名單擋不住這個，因為那是一個完全合法的提示。
+    {
+        let ep_pairs = effective_pairs(&state, &alias)?;
+        if has_proxy(&ep_pairs) {
+            return Err(AppError::Other(format!(
+                "'{alias}' goes through a jump host; in-app deploy is refused because the \
+                 password would be offered to the jump host as well"
+            )));
+        }
+    }
+
     let dir = crate::keys::ssh_dir()?;
     let pub_path = crate::keys::validate_public_path(&public_path, &dir)?;
     let pub_material = std::fs::read_to_string(&pub_path)?;
@@ -1928,14 +1979,30 @@ git commit -m "feat(host-editor): manage the host password stored in the OS keyc
 ```rust
     #[test]
     fn openssh_version_gate_requires_8_4() {
-        // SSH_ASKPASS_REQUIRE 是 OpenSSH 8.4 才有的。
+        // SSH_ASKPASS_REQUIRE 是 OpenSSH 8.4 引入的，但 kbdint 的 `(user@host) ` 前綴要到
+        // 8.5 才有。白名單已不接受裸的 `Password: `，所以閘門必須是 8.5 而非 8.4。
         assert!(openssh_supports_askpass_require("OpenSSH_10.2p1, LibreSSL 3.3.6"));
         assert!(openssh_supports_askpass_require("OpenSSH_9.6p1, LibreSSL 3.3.6"));
-        assert!(openssh_supports_askpass_require("OpenSSH_8.4p1, OpenSSL 1.1.1"));
+        assert!(openssh_supports_askpass_require("OpenSSH_8.5p1, OpenSSL 1.1.1"));
+        assert!(!openssh_supports_askpass_require("OpenSSH_8.4p1, OpenSSL 1.1.1"));
         assert!(!openssh_supports_askpass_require("OpenSSH_8.3p1, OpenSSL 1.1.1"));
         assert!(!openssh_supports_askpass_require("OpenSSH_7.9p1, LibreSSL 2.7.3"));
         // 認不出來時保守放行，讓實際部署去回報真正的錯誤。
         assert!(openssh_supports_askpass_require("something unparseable"));
+    }
+
+    #[test]
+    fn detects_jump_hosts_so_deploy_can_refuse_them() {
+        // 這不是「不支援」而是「必須拒絕」：askpass 的環境變數會被 ProxyCommand 子進程
+        // 繼承，跳板的密碼提示是完全合法的形狀，白名單擋不住 —— 結果是把目標主機的密碼
+        // 送給跳板主機。
+        assert!(has_proxy(&pairs(&[("proxyjump", "bastion")])));
+        assert!(has_proxy(&pairs(&[("proxycommand", "ssh -W %h:%p bastion")])));
+        // `none` 是明確停用，不算跳板。
+        assert!(!has_proxy(&pairs(&[("proxyjump", "none")])));
+        assert!(!has_proxy(&pairs(&[("proxycommand", "none")])));
+        assert!(!has_proxy(&pairs(&[("proxyjump", "")])));
+        assert!(!has_proxy(&pairs(&[("hostname", "10.0.0.9")])));
     }
 
     #[test]
@@ -1966,7 +2033,8 @@ Expected: FAIL —— `cannot find function 'openssh_supports_askpass_require'`
 在 `deploy.rs` 的 commands 區之前插入：
 
 ```rust
-/// `SSH_ASKPASS_REQUIRE` 是 OpenSSH 8.4 引入的。解析 `ssh -V` 的輸出判斷是否支援。
+/// 閘門是 OpenSSH **8.5**：`SSH_ASKPASS_REQUIRE` 雖然 8.4 就有，但 kbdint 提示的
+/// `(user@host) ` 前綴要到 8.5 才加入，而白名單已不接受裸的 `Password: `。
 /// 認不出版本時回 true（保守放行，讓真正的部署去回報實際錯誤）。
 pub fn openssh_supports_askpass_require(version_line: &str) -> bool {
     let Some(rest) = version_line.split("OpenSSH_").nth(1) else {
@@ -1981,7 +2049,7 @@ pub fn openssh_supports_askpass_require(version_line: &str) -> bool {
         return true;
     };
     match (major.parse::<u32>(), minor.parse::<u32>()) {
-        (Ok(major), Ok(minor)) => major > 8 || (major == 8 && minor >= 4),
+        (Ok(major), Ok(minor)) => major > 8 || (major == 8 && minor >= 5),
         _ => true,
     }
 }
@@ -2005,7 +2073,7 @@ pub fn password_auth_is_blocked(pairs: &[(String, String)]) -> bool {
 #[cfg_attr(test, derive(ts_rs::TS))]
 #[cfg_attr(test, ts(export, export_to = "../../src/bindings/"))]
 pub struct DeployPreflight {
-    /// 本機 ssh 是否支援 SSH_ASKPASS_REQUIRE（< 8.4 則無法自動填密碼）。
+    /// 本機 ssh 是否夠新（>= 8.5）可自動填密碼。
     pub askpass_supported: bool,
     /// 這台 host 的設定是否封鎖了密碼認證。
     pub password_auth_blocked: bool,
@@ -2059,7 +2127,7 @@ Expected: 22 passed
 
 在 `DeployKeyDialog.tsx` 的 `form` 階段開啟時呼叫 `deploy_preflight`（新增 `useDeployPreflight()` mutation 到 `queries.ts`，寫法照 `usePrecheckHostKey`），並：
 
-- `askpassSupported` 為 false → 在對話框頂端顯示紅色說明「This machine’s OpenSSH is older than 8.4 and cannot auto-fill the password. Use the terminal-based deploy instead.」並停用 Deploy 按鈕。
+- `askpassSupported` 為 false → 在對話框頂端顯示紅色說明「This machine’s OpenSSH is older than 8.5 and cannot auto-fill the password. Use the terminal-based deploy instead.」並停用 Deploy 按鈕。
 - `passwordAuthBlocked` 為 true → 顯示黃色說明「This host’s config sets `PreferredAuthentications` without `password`, so the password will never be used. Deploy will fail with “Permission denied”.」但**不**停用按鈕（使用者可能就是想用金鑰部署）。
 - `keychainAvailable` 為 false → **停用並取消勾選「記住這台主機的密碼」**，旁邊顯示「No credential store on this machine — the password will be used once and not saved.」。這一步不可省略：後端在無密鑰環時走環境變數 fallback，`remember` 為 true 也不會有任何東西被存下來，勾選框若仍可勾就是在騙使用者。
 

@@ -300,7 +300,7 @@ Task 2 的 review 讀了 OpenSSH 原始碼，推翻了本設計原先對 askpass
 ## 邊界情況與風險
 
 - **使用者 config 設了 `PreferredAuthentications publickey`** → 密碼永遠不會被使用，部署會以「Permission denied」失敗。SSHelter 已有 `ssh -G` 整合，可在部署前偵測並給明確訊息，而不是讓使用者看到誤導的「密碼錯誤」。
-- **ProxyJump 主機也要密碼** → 不支援（helper 分不出是哪一跳在問）。UI 需明示。
+- **ProxyJump / ProxyCommand** → **主動拒絕，不是「不支援」**（2026-07-30 更正）。`SSH_ASKPASS` 與 `SSHELTER_ASKPASS_*` 會被 ProxyCommand 子進程繼承，而跳板的 `user@jump's password: ` 是**完全合法形狀**的提示 —— 白名單擋不住，helper 會拿「目標主機的密碼」去回答跳板，等於把密碼洩漏給另一台機器。`deploy_key` 用 `ssh -G` 的 `proxyjump`／`proxycommand` 偵測並直接回錯，UI 顯示原因。
 - **遠端是 Windows sshd** → 遠端 script 會失敗；`classify_outcome` 需回 `RemoteError` 並給可讀訊息。
 - **OpenSSH < 8.4** → `SSH_ASKPASS_REQUIRE` 不存在，askpass 不會被強制使用。啟動時檢查 `ssh -V`，過舊則停用本功能並說明。
 - **Linux 無 Secret Service** → 走 env var fallback，UI 明示密碼不會被儲存。
