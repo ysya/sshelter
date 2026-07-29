@@ -222,12 +222,84 @@ test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 199 filtered out; fi
 
 ---
 
+## Task 3（2026-07-30）：假設 2 驗證 —— 打包後的 bundle 自我啟動為 helper
+
+對應 brief：`.superpowers/sdd/2026-07-29-key-deploy-password/task-3-brief.md`。程式碼變更：`src-tauri/src/main.rs` 在任何 Tauri 呼叫之前攔截 `SSHELTER_ASKPASS=1` 並呼叫 `sshelter_lib::askpass::run()`。`askpass::run()` 的型別是 `-> !`，內部每一個分支都以 `std::process::exit` 結尾，因此 `main()` 裡緊接在後的 `sshelter_lib::run()`（也就是 `tauri::Builder::default()....run(...)`，唯一會啟動 AppKit/WebView 的程式碼）在 `SSHELTER_ASKPASS=1` 這個分支**在控制流程上就不可能被執行到**——這是靜態保證，不只是本次實測剛好沒撞到。
+
+### Step 3：debug 執行檔（未打包）
+
+```bash
+cd src-tauri
+BIN=./target/debug/sshelter
+
+SSHELTER_ASKPASS=1 SSHELTER_ASKPASS_SECRET=hunter2 \
+  "$BIN" "Are you sure you want to continue connecting (yes/no/[fingerprint])? " \
+  >/tmp/reject.stdout 2>/tmp/reject.stderr
+echo "rejected exit=$?"
+```
+
+輸出：`rejected exit=1`；`/tmp/reject.stdout` 為 0 bytes；`/tmp/reject.stderr` 為 `[sshelter-askpass] refused: "Are you sure you want to continue connecting (yes/no/[fingerprint])? "`。
+
+```bash
+SSHELTER_ASKPASS=1 SSHELTER_ASKPASS_SECRET=hunter2 \
+  "$BIN" "spike@localhost's password: " \
+  >/tmp/accept.stdout 2>/tmp/accept.stderr
+echo "accepted exit=$?"
+```
+
+輸出：`accepted exit=0`；`od -c /tmp/accept.stdout` 顯示恰為 `h u n t e r 2 \n`（8 bytes）；`/tmp/accept.stderr` 為 0 bytes。兩次結果都與白名單設計相符，且完全複現 brief Step 3 的期望。
+
+### Step 4：打包後的 bundle
+
+```bash
+pnpm tauri build --debug
+```
+
+`.app` 本體成功打包：`Bundling SSHelter.app (.../target/debug/bundle/macos/SSHelter.app)`。**後續的 DMG 打包步驟失敗**（`bundle_dmg.sh` 執行失敗，`[ELIFECYCLE] Command failed with exit code 1`）——研判是 `bundle_dmg.sh` 內部用 AppleScript 操控 Finder 排版視窗圖示，在這次無互動桌面 session 的環境下無法完成；這與 Step 4 要驗證的目標（`.app` 內執行檔的 helper 行為）無關，`.app` bundle 本身在 DMG 步驟失敗前已完整產出，不影響本假設的驗證。
+
+執行 brief 指定的萬用字元探測：
+
+```bash
+APP=$(ls src-tauri/target/debug/bundle/macos/SSHelter.app/Contents/MacOS/*)
+```
+
+只比對到唯一一個檔案：`src-tauri/target/debug/bundle/macos/SSHelter.app/Contents/MacOS/sshelter`（`file` 確認為 `Mach-O 64-bit executable arm64`；`codesign -dv` 確認 `flags=0x20002(adhoc,linker-signed)`、`Signature=adhoc`，與已安裝的正式版一致，非本假設重點但供對照）。
+
+**偏離 brief 逐字指令之處**：brief Step 4 範例用 `"Password: "` 且預期 `exit=0`。但 Task 2 已把白名單收緊為「無前綴時只接受 client 產生的固定形狀」，`askpass.rs` 的 `accepts_kbdint_password_prompt_with_client_prefix` 測試明確斷言 `!prompt_is_answerable("Password: ")`——裸的 `Password: ` 現在是**刻意拒絕**的形狀，不再是合法的 accept 範例。依控制者指示改用與 Step 3 相同、目前確實會被接受/拒絕的兩個字串重跑：
+
+```bash
+SSHELTER_ASKPASS=1 SSHELTER_ASKPASS_SECRET=hunter2 "$APP" "spike@localhost's password: "
+# bundle accept exit=0；stdout od -c 恰為 h u n t e r 2 \n（8 bytes）；stderr 0 bytes
+
+SSHELTER_ASKPASS=1 SSHELTER_ASKPASS_SECRET=hunter2 "$APP" "Are you sure you want to continue connecting (yes/no/[fingerprint])? "
+# bundle reject exit=1；stdout 0 bytes；stderr: [sshelter-askpass] refused: "..."
+```
+
+兩者與 debug 執行檔（未打包）的行為逐位元組一致。
+
+### GUI 檢查方法與結果（Step 3、4 的關鍵）
+
+**方法**：本 agent 執行於非互動的背景 shell，無法用肉眼確認「有沒有視窗閃現」或「Dock 有沒有跳圖示」。改用以下幾項可在非互動環境驗證、且彼此獨立的訊號：
+
+1. **執行時間**：`time (SSHELTER_ASKPASS=1 ... "$APP" "spike@localhost's password: " >/dev/null 2>&1)` → `0.00s user 0.00s system 74% cpu 0.006 total`。作為對照，`lsappinfo` 顯示同一支 app 正常 GUI 啟動的 `launch to checkin time: 10.9872 seconds`——helper 模式 6 毫秒 vs. 正常 GUI 啟動 11 秒，相差約 1800 倍，與「完全沒有初始化 AppKit/WebView」一致。
+2. **Launch Services 註冊（`lsappinfo list`）**：分別在測試前、測試中（背景執行時緊接著 20 次高頻 `ps` 輪詢）、測試後各取一次快照，比對 `grep -i sshelter` 的結果。三次快照完全相同,只有已安裝、本來就在執行中的 `/Applications/SSHelter.app`（checkin time 為 2+ 天前，對應本機一直開著、縮到系統匣的正式版，PID 660）——我們測試用的 `.../target/debug/bundle/macos/SSHelter.app` 從未出現任何一筆新註冊。**補充說明其論證力道**：單純直接執行 bundle 內的 Mach-O（不透過 `open`／Finder）本身並不保證不會註冊 Launch Services——只要程式碼真的跑到 `NSApplicationMain`（Tauri/tao 事件迴圈的底層），一般仍會正常取得 Dock 圖示與 LS 註冊。因此「完全沒有新註冊」這件事,對應的正是「程式碼在到達那段初始化之前就已經 `exit()`」，而不是「直接執行 bundle 執行檔」這個啟動方式本身的副作用。
+3. **process 存活時間（`ps` 輪詢）**：背景啟動後緊接 20 次幾乎無間隔的 `ps -p <pid>`輪詢，只在 1/20 次輪詢中捕捉到該 process 存在,其餘 19 次已經結束——與「立即印出答案並結束」一致，不是長駐等待事件迴圈的行為。
+4. **無殘留 process／無 crash report**：測試後 `ps aux | grep sshelter` 只剩下本來就在跑的正式版（PID 660，`Mon05AM` 就啟動，與本次測試無關）；`~/Library/Logs/DiagnosticReports` 過去 10 分鐘內無任何 `sshelter` 相關的當機報告（若真的初始化一半又崩潰，跳出的當機對話框也算一種「GUI」，因此一併排除）；`lsappinfo front` 回報的最前景 app ASN 與上述任何 SSHelter 相關 ASN 皆不同。
+
+**做不到、誠實聲明放棄的部分**：曾嘗試用 `osascript -e 'tell application "System Events" to get name of every process'` 想直接列舉當下所有 GUI process/視窗，但這個呼叫觸發了 macOS 的 Automation 權限對話框（要求允許本 shell 控制 System Events），在非互動 session 中無法點擊，導致該指令掛住直到 120 秒逾時被強制終止（已確認終止後沒有殘留的 `osascript` 行程；`System Events.app` 是 macOS 自身隨附的自動化服務，並非我們的程式碼產生的副作用）。此後放棄任何需要 Accessibility/Automation 權限的檢查方式,只採用上述四項不需要額外權限的訊號。**因此「肉眼確認畫面上沒有任何視窗閃現」這一半,本次無法百分之百驗證**——真正蓋棺論定需要一個人坐在互動式 session 前實際觀察螢幕,而不只是取得 shell 執行權限。上述四項訊號（尤其是控制流程上的靜態保證 + 6ms 執行時間 + 零 Launch Services 註冊）已足以高度支持「沒有初始化 GUI」，但不等同人眼觀察的直接證據。
+
+### 結論（Verdict）
+
+**假設 2：傾向成立（YES，但有一項無法窮盡驗證的子項）。** 打包後的 `.app` bundle 內的執行檔,在 `SSHELTER_ASKPASS=1` 時可以乾淨退出、行為與未打包的 debug 執行檔逐位元組一致（正確的 exit code、正確的 stdout/stderr 內容),且四項獨立、非侵入式的訊號（執行時間、Launch Services 註冊、process 存活時間、無殘留/無當機報告）都與「完全沒有初始化 GUI」一致。唯一未能完成的是「人眼直接觀察畫面上是否有視窗閃現」——這需要互動式 session,本次非互動 agent shell 結構上做不到,且嘗試用 System Events 自動化取代人眼觀察時卡在無法回應的權限對話框上。**在這個限定下,沒有觀察到任何跡象顯示假設 2 不成立**,不需要轉向 Task 6 的 sidecar（`bundle.externalBin`）設計。
+
+（範圍限制：本次僅驗證 macOS bundle；spec 原文亦要求驗證 Linux AppImage,但本次開發環境只有 macOS,未驗證,留待有 Linux 環境時再補。）
+
 ## 三個假設總覽
 
 | # | 假設 | 結果 |
 |---|------|------|
 | 1 | `SSH_ASKPASS_REQUIRE=force` 攔截 password 認證提示，零互動 | **成立（YES）**——見 Step 3 |
-| 2 | Tauri 打包後的 bundle 自我啟動為 helper 可乾淨退出 | 本 task 不驗證，留給 Task 3 |
+| 2 | Tauri 打包後的 bundle 自我啟動為 helper 可乾淨退出 | Task 3：**傾向成立（YES）**——exit code／stdout/stderr 逐位元組正確,執行時間 6ms、Launch Services 零新註冊、無殘留 process/當機報告皆與「未初始化 GUI」一致；但「人眼直接觀察無視窗閃現」在非互動 shell 中無法窮盡驗證（見 Task 3 章節） |
 | 3 | 未簽章 app 存取自建 keychain 項目的提示行為 | Task 0 **BLOCKED**；Task 1 `round_trip_set_get_delete` 補上第一手證據——`available()` 為 `true`、0.21 秒內完成、無阻塞式對話框（見 Step 5 後續更新；限定於 `cargo test` 執行檔存取自建項目，尚未涵蓋已打包 app 或跨簽章身分存取既有項目） |
 
 **額外發現（非原三假設之一，但影響 Task 2/4 設計）**：`SSH_ASKPASS_REQUIRE=force` 對所有 askpass 風格提示（password **與** host-key 信任確認）都會生效；正式 askpass 替身必須以白名單只回答「password:」形狀的提示，其餘一律拒答，否則會像本次實測一樣對 host-key 提示造成無限迴圈。
