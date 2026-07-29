@@ -287,7 +287,7 @@ SSHELTER_ASKPASS=1 SSHELTER_ASKPASS_SECRET=hunter2 "$APP" "Are you sure you want
 
 **方法**：本 agent 執行於非互動的背景 shell，無法用肉眼確認「有沒有視窗閃現」或「Dock 有沒有跳圖示」。改用以下幾項可在非互動環境驗證、且彼此獨立的訊號：
 
-1. **執行時間**：`time (SSHELTER_ASKPASS=1 ... "$APP" "spike@localhost's password: " >/dev/null 2>&1)` → `0.00s user 0.00s system 74% cpu 0.006 total`。**6 毫秒這個絕對數字本身就足以支撐論點,不需要靠比較**：這支 app 掛載 8 個 Tauri plugin,任何一次真正的 AppKit/WebView 初始化都不可能在 6 毫秒內完成。（先前這裡曾把 `lsappinfo` 回報的、同一支 app 正常 GUI 啟動的 `launch to checkin time: 10.9872 seconds` 拿來相除,算出「約 1800 倍」的比值,已經拿掉——那個 11 秒數字來自**另一個、已經在跑兩天的已安裝 process**,`launch to checkin` 是 macOS 生命週期的一個里程碑事件,不是 `time` 量的 fork/exec 到結束 wall clock,兩者既不是同一個 process,也不是同一種量測基準；11 秒對這支 app 而言本身也偏慢,很可能只是登入時的資源競爭,拿來當分母只會製造這次量測撐不起的假精確度。6ms 這個數字單獨站得住,不需要那個比值。）
+1. **執行時間**：`time (SSHELTER_ASKPASS=1 ... "$APP" "spike@localhost's password: " >/dev/null 2>&1)` → `0.00s user 0.00s system 74% cpu 0.006 total`。**6 毫秒這個絕對數字本身就足以支撐論點,不需要靠比較**：任何一次真正的 AppKit/WebView 初始化都不可能在 6 毫秒內完成——這個論點不需要靠「這支 app 掛載了幾個 Tauri plugin」來加強,也刻意不寫具體數字（先前寫的「8 個」點錯了,實際是 7 個;既然數字本來就不影響論點成立與否,直接拿掉,不留一個需要另外核對的數字）。（先前這裡曾把 `lsappinfo` 回報的、同一支 app 正常 GUI 啟動的 `launch to checkin time: 10.9872 seconds` 拿來相除,算出「約 1800 倍」的比值,已經拿掉——那個 11 秒數字來自**另一個、已經在跑兩天的已安裝 process**,`launch to checkin` 是 macOS 生命週期的一個里程碑事件,不是 `time` 量的 fork/exec 到結束 wall clock,兩者既不是同一個 process,也不是同一種量測基準；11 秒對這支 app 而言本身也偏慢,很可能只是登入時的資源競爭,拿來當分母只會製造這次量測撐不起的假精確度。6ms 這個數字單獨站得住,不需要那個比值。）
 2. **Launch Services 註冊（`lsappinfo list`）**：分別在測試前、測試中（背景執行時緊接著 20 次高頻 `ps` 輪詢）、測試後各取一次快照，比對 `grep -i sshelter` 的結果。三次快照完全相同,只有已安裝、本來就在執行中的 `/Applications/SSHelter.app`（checkin time 為 2+ 天前，對應本機一直開著、縮到系統匣的正式版，PID 660）——我們測試用的 `.../target/debug/bundle/macos/SSHelter.app` 從未出現任何一筆新註冊。**補充說明其論證力道**：單純直接執行 bundle 內的 Mach-O（不透過 `open`／Finder）本身並不保證不會註冊 Launch Services——只要程式碼真的跑到 `NSApplicationMain`（Tauri/tao 事件迴圈的底層），一般仍會正常取得 Dock 圖示與 LS 註冊。因此「完全沒有新註冊」這件事,對應的正是「程式碼在到達那段初始化之前就已經 `exit()`」，而不是「直接執行 bundle 執行檔」這個啟動方式本身的副作用。
 3. **process 存活時間（`ps` 輪詢）**：背景啟動後緊接 20 次幾乎無間隔的 `ps -p <pid>`輪詢，只在 1/20 次輪詢中捕捉到該 process 存在,其餘 19 次已經結束——與「立即印出答案並結束」一致，不是長駐等待事件迴圈的行為。
 4. **無殘留 process／無 crash report**：測試後 `ps aux | grep sshelter` 只剩下本來就在跑的正式版（PID 660，`Mon05AM` 就啟動，與本次測試無關）；`~/Library/Logs/DiagnosticReports` 過去 10 分鐘內無任何 `sshelter` 相關的當機報告（若真的初始化一半又崩潰，跳出的當機對話框也算一種「GUI」，因此一併排除）；`lsappinfo front` 回報的最前景 app ASN 與上述任何 SSHelter 相關 ASN 皆不同。
@@ -308,7 +308,7 @@ SSHELTER_ASKPASS=1 SSHELTER_ASKPASS_SECRET=hunter2 lldb -b \
 `breakpoint set`順利完成，回報 `Breakpoint 1: no locations (pending)`（預期行為——AppKit 尚未載入，中斷點延後解析）。但接著 `run` 之後整個指令卡住，不再有任何新輸出，直到背景工作的 9 分鐘上限前被主動中止。診斷過程：
 
 - `ps -p <pid>` 顯示目標 process（`sshelter ... spike@localhost's password:`）處於 `T`（stopped）狀態超過 3 分鐘不變。
-- `lldb` 本身的累積 CPU 時間在這段期間完全沒有增加（前後皆為 `0:06.85`，`%CPU` 為 0）——不是還在運算，是真的被卡住，不是「符號解析很慢」。
+- 另外對 `lldb` 本身的累積 CPU 時間做了一次**間隔 5 秒**的前後比對（不是前面那 3 分鐘觀察的一部分，是另外、更短的一次取樣）：前後皆為 `0:06.85`，`%CPU` 為 0——這 5 秒內沒有任何運算，不是還在慢慢處理符號。這項 CPU 比對只是輔助訊號；「被卡住」的結論不倚賴它，`T`（stopped）狀態本身，加上下面 `debugserver` log 在 `task_for_pid()` 之後 5 分鐘沒有任何新輸出，已經足以獨立支持這個結論。
 - `/usr/bin/log show --last 5m --predicate 'process == "debugserver"'` 讀 `debugserver` 自己的 log，最後一行停在：
 
   ```
