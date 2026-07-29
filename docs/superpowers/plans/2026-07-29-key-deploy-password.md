@@ -1755,6 +1755,7 @@ pub fn deploy_precheck_host_key(
     state: tauri::State<crate::state::AppState>,
     alias: String,
 ) -> Result<HostKeyStatus, AppError> {
+    require_default_config_root(&state)?;
     let ep = resolve_endpoint(&state, &alias)?;
 
     let scanned = match Command::new("ssh-keyscan").args(keyscan_target(&ep)).output() {
@@ -1823,6 +1824,10 @@ pub fn deploy_key(
             .ok_or_else(|| AppError::Other("no config loaded".to_string()))?;
         crate::connect::validate_alias(doc, &alias)?;
     }
+    // 設定檔分歧閘門：探測與部署必須看同一份設定，否則我們對這個 alias 的一切推理
+    // （跳板、endpoint、認證方式）都可能來自一份 ssh 根本不會讀的檔案。
+    require_default_config_root(&state)?;
+
     // ProxyJump／ProxyCommand 必須「主動拒絕」，不能只是「不支援」。
     // `SSH_ASKPASS` 與 `SSHELTER_ASKPASS_*` 會被 ProxyCommand 子進程繼承，於是跳板
     // 主機的 `user@jump's password: ` 提示會被 helper 用「目標主機的密碼」回答 ——
