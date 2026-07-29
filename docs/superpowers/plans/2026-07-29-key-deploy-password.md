@@ -596,7 +596,10 @@ Expected: 第一次 `exit=1` 且無任何輸出；第二次印出 `hunter2` 且 
 ```bash
 cd /Users/ysya/project/homelab/ssheditor
 pnpm tauri build --debug
-APP="src-tauri/target/debug/bundle/macos/SSHelter.app/Contents/MacOS/SSHelter"
+# bundle 內的執行檔名來自 Cargo package name（小寫 `sshelter`），不是 productName
+# （`SSHelter`）。不要寫死 —— 用萬用字元探測，順便確認只有一個候選。
+APP=$(ls src-tauri/target/debug/bundle/macos/SSHelter.app/Contents/MacOS/*)
+echo "bundle executable: $APP"
 SSHELTER_ASKPASS=1 SSHELTER_ASKPASS_SECRET=hunter2 "$APP" "Password: "
 echo "bundle exit=$?"
 ```
