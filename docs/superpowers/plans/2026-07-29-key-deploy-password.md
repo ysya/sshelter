@@ -1486,7 +1486,7 @@ pub fn compare_host_keys(
 - [ ] **Step 4: 執行測試確認通過**
 
 Run: `cd src-tauri && cargo test deploy:: -- --nocapture`
-Expected: 20 passed
+Expected: 36 passed（deploy.rs 在 Task 4 已有 24 個，本 task 再加 12）
 
 若 `fingerprint_sha256` 對測試中的假 base64 回 `None`，測試的 `starts_with("SHA256:")` 會失敗 —— 此時把 `SCANNED` 常數換成一段真實的 ed25519 公鑰 base64（可用 `ssh-keyscan github.com` 取得）。
 
