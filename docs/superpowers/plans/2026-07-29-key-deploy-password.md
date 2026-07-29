@@ -18,7 +18,8 @@
 - 所有 alias 進入任何指令前必須先過 `connect::validate_alias`（拒絕前導 `-` 的選項注入）。
 - 所有 `.pub` 路徑必須先過 `keys::validate_public_path`（canonicalize 後仍須在 `~/.ssh` 內且仍以 `.pub` 結尾）。
 - keychain service 名稱固定為字串 `"SSHelter"`。account 命名：正式 `host:<alias>`、暫存 `deploy-tmp:<alias>`。
-- `keyring` 版本固定 `4.1.5`（MSRV 1.88.0）。API：`keyring::Entry::new(service, username) -> keyring::Result<Entry>`、`.set_password(&str)`、`.get_password() -> Result<String>`、`.delete_credential()`。錯誤變體使用 `keyring::Error::NoEntry`（無此項目）與 `keyring::Error::NoDefaultStore`（本機無可用密鑰環）。
+- `keyring` 版本固定 `4.1.5`（MSRV 1.88.0）。API：`keyring::Entry::new(service, username) -> keyring::Result<Entry>`、`.set_password(&str)`、`.get_password() -> Result<String>`、`.delete_credential()`。`keyring::Error::NoEntry` 代表「無此項目」，是 `get`/`delete` 要當成正常情況處理的變體。
+- **`available()` 不可靠 `NoDefaultStore` 判斷（2026-07-29 實測更正，使用者已裁定）**：`keyring::Entry::new` 的初始化旗標是「先 `compare_exchange` 設 true，再呼叫 `set_credential_store()?`」，而 Linux 的 `zbus_secret_service_keyring_store::Store::new()` 內部會 `Service::new()?` 真的連 D-Bus。因此在沒有 Secret Service 的 Linux 上，**第一次**呼叫回傳的是連線類錯誤而非 `NoDefaultStore`，第二次以後才是 `NoDefaultStore` —— 亦即在這個機制唯一存在意義的平台上，第一次呼叫會錯答「可用」。正確寫法是**任何 `Err` 都視為不可用**：`keyring::Entry::new(SERVICE, "availability-probe").is_ok()`。
 - 前端所有後端呼叫走 `src/lib/ipc.ts` 的 `tauriInvoke<T>(cmd, args)`。
 - ts-rs 型別以 `#[cfg_attr(test, derive(ts_rs::TS))]` + `#[cfg_attr(test, ts(export, export_to = "../../src/bindings/"))]` 宣告，執行 `cargo test` 時產生到 `src/bindings/`。
 - **serde 命名的陷阱（會咬人，請先讀）**：`#[serde(rename_all = "camelCase")]` 標在 **enum** 上只改**變體名**，**不改變體內的欄位名**；標在 **struct** 上才會改欄位名。所以 `HostKeyStatus::New { key_line }` 在 JSON 裡是 `{"kind":"new","key_line":"…"}`（欄位維持 snake_case），而 `DeployPreflight` 的欄位會變成 `askpassSupported`。前端存取時務必以產生出來的 `src/bindings/*.ts` 為準，不要憑印象寫。
@@ -237,11 +238,13 @@ pub fn delete(account: &str) -> Result<(), AppError> {
 }
 
 /// 本機是否有可用的密鑰環。false 時呼叫端要改走環境變數 fallback 並告知使用者。
+///
+/// 刻意把「任何錯誤」都視為不可用，而不是只認 `NoDefaultStore`：在沒有 Secret Service
+/// 的 Linux 上，第一次呼叫拿到的是 D-Bus 連線錯誤，第二次以後才是 `NoDefaultStore`
+/// （`Entry::new` 會先把初始化旗標設成 true 才嘗試建 store）。只認單一變體會在這個
+/// 機制唯一存在意義的平台上、第一次呼叫時錯答「可用」。
 pub fn available() -> bool {
-    !matches!(
-        keyring::Entry::new(SERVICE, "availability-probe"),
-        Err(keyring::Error::NoDefaultStore)
-    )
+    keyring::Entry::new(SERVICE, "availability-probe").is_ok()
 }
 ```
 

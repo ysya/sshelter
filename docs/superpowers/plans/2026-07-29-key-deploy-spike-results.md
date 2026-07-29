@@ -194,9 +194,31 @@ source=no usable signature
 
 已安裝的 SSHelter.app 目前確實是 ad-hoc 簽章、無 TeamIdentifier，`spctl` 判定 rejected——與 spec 假設情境（未公證未簽章 build）相符，但這只是背景資訊，不能取代真正對 keychain 存取提示行為的實測。
 
+### 後續更新（Task 1，2026-07-29）：假設 3 已有第一手證據
+
+Task 1 為 `secrets.rs` 寫的 `round_trip_set_get_delete` 測試，實際執行時提供了本次 spike 當下拿不到的第一手觀察（單獨隔離執行）：
+
+```
+$ cargo test secrets::tests::round_trip_set_get_delete -- --nocapture --exact
+running 1 test
+test secrets::tests::round_trip_set_get_delete ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 199 filtered out; finished in 0.21s
+```
+
+輸出中沒有出現測試裡「no credential store」的 skip 訊息，代表 `available()` 回傳 `true`，且真的走了 `set` → `get` → `delete` → 再讀回確認 `None` → 再 `delete` 一次（驗證可重入）這條真實路徑，不是提早 return 的分支。整個 `cargo test`（含編譯）數秒內完成，測試本體只花 0.21 秒，過程中沒有任何停頓、卡住或需要人工介入的跡象。
+
+**觀察結論：這次以 `cargo test` 產生的（同樣未簽章/ad-hoc）測試執行檔存取 SSHelter 自建的 keychain 項目時，沒有跳出「允許存取鑰匙圈」的 GUI 對話框，執行也沒有被卡住等待互動。**
+
+保留的限制（誠實記錄，不誇大這次觀察的涵蓋範圍）：
+1. 這次驗證的是 `cargo test` 產生的測試執行檔，不是 Task 0 原本要驗證的「已打包、ad-hoc 簽章的 `SSHelter.app`」本體。兩者雖然都是未簽章/ad-hoc，但簽章身分不必然相同，keychain 的 ACL 判斷(「這是同一個 app 嗎」)也可能因此不同——這是強力佐證，不是對已打包 app 的逐位元組驗證。
+2. 這次是同一個 process 建立、讀取、刪除同一筆項目，屬於「自己存取自己剛建立的項目」的情境，不是「不同簽章身分存取既有項目」的情境（後者更接近使用者升級/重裝 app 後、舊 app 建立的既有 keychain 項目被新 app 存取的實際場景）。
+3. 沒有嘗試用任何方式抑制或繞過對話框——本來就沒有出現，符合「若跳出對話框不得抑制或繞過」的要求。
+
 ### 結論（Verdict）
 
-**假設 3：無法驗證（BLOCKED），非「成立」也非「不成立」。** 需要人工在真正互動式終端機（非本 agent 的背景 shell）重跑 Step 5 的三行 `security` 指令並親眼觀察是否跳出鑰匙圈存取對話框，才能得出結論。
+**Task 0 當下**：無法驗證（BLOCKED），非「成立」也非「不成立」——寫入指令被權限分類器擋下，且背景 shell 本來就看不到 GUI 對話框。
+
+**Task 1 更新**（見上方「後續更新」）：`round_trip_set_get_delete` 測試提供了第一手證據——`available()` 為 `true`、真正碰了 keychain、0.21 秒內完成、全程無停頓，沒有觀察到鑰匙圈存取對話框。**在「同一 process 建立並存取自己項目」與「`cargo test` 執行檔」這兩個限定條件下，假設 3 傾向不成立（不會跳出阻塞式對話框）**；但「已打包 SSHelter.app 存取」與「不同簽章身分存取既有項目」這兩種更貼近實際使用情境的狀況仍未實測，不宜視為假設 3 全面成立。
 
 ---
 
@@ -206,7 +228,7 @@ source=no usable signature
 |---|------|------|
 | 1 | `SSH_ASKPASS_REQUIRE=force` 攔截 password 認證提示，零互動 | **成立（YES）**——見 Step 3 |
 | 2 | Tauri 打包後的 bundle 自我啟動為 helper 可乾淨退出 | 本 task 不驗證，留給 Task 3 |
-| 3 | 未簽章 app 存取自建 keychain 項目的提示行為 | **無法驗證（BLOCKED）**——見 Step 5，需人工於互動式終端機重跑 |
+| 3 | 未簽章 app 存取自建 keychain 項目的提示行為 | Task 0 **BLOCKED**；Task 1 `round_trip_set_get_delete` 補上第一手證據——`available()` 為 `true`、0.21 秒內完成、無阻塞式對話框（見 Step 5 後續更新；限定於 `cargo test` 執行檔存取自建項目，尚未涵蓋已打包 app 或跨簽章身分存取既有項目） |
 
 **額外發現（非原三假設之一，但影響 Task 2/4 設計）**：`SSH_ASKPASS_REQUIRE=force` 對所有 askpass 風格提示（password **與** host-key 信任確認）都會生效；正式 askpass 替身必須以白名單只回答「password:」形狀的提示，其餘一律拒答，否則會像本次實測一樣對 host-key 提示造成無限迴圈。
 
