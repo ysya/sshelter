@@ -903,7 +903,7 @@ fn first_line_or(stderr: &str, fallback: &str) -> String {
 - [ ] **Step 4: 執行測試確認通過**
 
 Run: `cd src-tauri && cargo test deploy:: -- --nocapture`
-Expected: 11 passed
+Expected: 13 passed
 
 - [ ] **Step 5: 確認 ts-rs 型別已產生**
 
