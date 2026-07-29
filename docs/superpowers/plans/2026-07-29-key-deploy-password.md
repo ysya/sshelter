@@ -2411,6 +2411,24 @@ git commit -m "feat(host-editor): manage the host password stored in the OS keyc
     }
 
     #[test]
+    fn revoked_outranks_cert_authority_when_both_are_present() {
+        // 順序保障：`@revoked` 必須在 `@cert-authority` 之前檢查。把兩個分支對調的話，
+        // CA 分支只看 marker 存不存在、完全不比對金鑰內容，會在檢查到 revoked 之前
+        // 就回 Trusted —— 一把被明確作廢的金鑰因此被放行並直接部署。
+        // 這是唯一一個「順序寫反不會有任何其他測試變紅」的地方。
+        let ep = Endpoint { hostname: "10.0.0.9".into(), port: "22".into() };
+        let blob = "AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl";
+        let scanned = format!("10.0.0.9 ssh-ed25519 {blob}\n");
+        let known = format!(
+            "@cert-authority 10.0.0.9 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\n             @revoked 10.0.0.9 ssh-ed25519 {blob}\n"
+        );
+        assert!(
+            matches!(compare_host_keys(&scanned, &known, &ep), HostKeyStatus::Mismatch { .. }),
+            "a revoked key must abort even when a cert-authority line is also present"
+        );
+    }
+
+    #[test]
     fn detects_jump_hosts_so_deploy_can_refuse_them() {
         // 這不是「不支援」而是「必須拒絕」：askpass 的環境變數會被 ProxyCommand 子進程
         // 繼承，跳板的密碼提示是完全合法的形狀，白名單擋不住 —— 結果是把目標主機的密碼
