@@ -595,16 +595,21 @@ Expected: 第一次 `exit=1` 且無任何輸出；第二次印出 `hunter2` 且 
 
 ```bash
 cd /Users/ysya/project/homelab/ssheditor
+# DMG 打包步驟（bundle_dmg.sh，走 Finder/AppleScript）在非互動 shell 會失敗，
+# 導致整個指令回傳非零 —— 但 .app 在那之前就已經完整產出，不影響本步驟。
 pnpm tauri build --debug
 # bundle 內的執行檔名來自 Cargo package name（小寫 `sshelter`），不是 productName
 # （`SSHelter`）。不要寫死 —— 用萬用字元探測，順便確認只有一個候選。
 APP=$(ls src-tauri/target/debug/bundle/macos/SSHelter.app/Contents/MacOS/*)
 echo "bundle executable: $APP"
-SSHELTER_ASKPASS=1 SSHELTER_ASKPASS_SECRET=hunter2 "$APP" "Password: "
+# 用「會被接受」的提示形狀。裸的 `Password: ` 在 Task 2 收緊白名單後已刻意被拒絕。
+SSHELTER_ASKPASS=1 SSHELTER_ASKPASS_SECRET=hunter2 "$APP" "spike@localhost's password: "
 echo "bundle exit=$?"
 ```
 
 Expected: 印出 `hunter2`、`exit=0`、**Dock 沒有出現 app 圖示、沒有視窗**。
+
+> 「沒有視窗」這半件事**無法從非互動 shell 證實**。可用的替代訊號：程序存活時間（helper 模式應為毫秒級，真正啟動 GUI 是秒級）、Launch Services 有無新註冊、有無殘留程序或當機報告。這些都成立時只能說「傾向成立」；要真正確認需要人在互動式終端機執行並親眼看。**不要把替代訊號寫成已證實。**
 
 若 bundle 版會啟動 GUI 或無法乾淨退出 → 假設 2 不成立，改為以 Tauri sidecar（`bundle.externalBin`）提供一支獨立的 helper 執行檔，並在 Task 6 把 `SSH_ASKPASS` 指向該 sidecar 而非 `current_exe()`。把結果補進 spike results 文件。
 
