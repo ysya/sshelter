@@ -1583,7 +1583,7 @@ git commit -m "feat(deploy): add host key precheck against known_hosts"
 
 **Interfaces:**
 - Consumes: Task 1 的 `secrets::*`、Task 4 的 `build_deploy_argv` / `classify_outcome`、Task 5 的 `endpoint_from_effective` / `keyscan_target` / `compare_host_keys`
-- Produces: 6 個 Tauri commands（見下）
+- Produces: 7 個 Tauri commands（見下）
 
 - [ ] **Step 1: 實作執行層**
 
@@ -2410,6 +2410,9 @@ git commit -m "feat(host-editor): manage the host password stored in the OS keyc
         assert!(openssh_supports_askpass_require("something unparseable"));
     }
 
+    /// **注意：這條測試實際上已在 Task 6 實作完成**（它是 Task 5 的 re-review 留下的
+    /// 範圍外觀察，當時併進 Task 6 以免為一條測試另開一個修正回合，但錨點誤放到了
+    /// 這一段）。重跑計畫時若發現它已存在，直接跳過即可，不要重複新增。
     #[test]
     fn revoked_outranks_cert_authority_when_both_are_present() {
         // 順序保障：`@revoked` 必須在 `@cert-authority` 之前檢查。把兩個分支對調的話，
