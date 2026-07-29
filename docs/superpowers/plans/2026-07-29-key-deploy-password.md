@@ -1314,12 +1314,35 @@ git commit -m "feat(deploy): add pure argv builder, remote script and outcome cl
     }
 
     #[test]
-    fn host_key_matches_bracketed_nonstandard_port_entries() {
-        // 非 22 埠在 known_hosts 裡寫成 [host]:port。
-        let ep = Endpoint { hostname: "10.0.0.9".into(), port: "2222".into() };
-        let scanned = "[10.0.0.9]:2222 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAAAA\n";
-        let known = "[10.0.0.9]:2222 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAAAA\n";
-        assert_eq!(compare_host_keys(scanned, known, &ep), HostKeyStatus::Trusted);
+    fn keygen_find_args_use_bracket_form_for_nonstandard_ports() {
+        let std_port = Endpoint { hostname: "h".into(), port: "22".into() };
+        assert_eq!(keygen_find_args(&std_port), vec!["-F".to_string(), "h".to_string()]);
+        let odd_port = Endpoint { hostname: "h".into(), port: "2222".into() };
+        assert_eq!(keygen_find_args(&odd_port), vec!["-F".to_string(), "[h]:2222".to_string()]);
+    }
+
+    #[test]
+    fn host_key_trusted_when_the_known_entry_is_hashed() {
+        // Debian／Ubuntu 的 HashKnownHosts 預設為 yes，項目長這樣。`ssh-keygen -F`
+        // 會替我們解析出來，所以第一欄是 `|1|…` 也必須照樣比對成功。
+        // 若這裡退回用字面 host 欄位過濾，這個測試會紅 —— 而真實後果是中間人攻擊
+        // 會被判成 New（可信任）而不是 Mismatch（硬中止）。
+        let ep = Endpoint { hostname: "10.0.0.9".into(), port: "22".into() };
+        let scanned = "10.0.0.9 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAAAA\n";
+        let hashed = "# Host 10.0.0.9 found: line 7\n                      |1|F1E2D3C4B5A6=|Zm9vYmFyYmF6cXV4= ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAAAA\n";
+        assert_eq!(compare_host_keys(scanned, hashed, &ep), HostKeyStatus::Trusted);
+    }
+
+    #[test]
+    fn host_key_mismatch_is_detected_even_for_hashed_entries() {
+        // 這是上面那個缺口最要命的一半：已信任但金鑰被換掉，必須是 Mismatch。
+        let ep = Endpoint { hostname: "10.0.0.9".into(), port: "22".into() };
+        let scanned = "10.0.0.9 ssh-ed25519 AAAAATTACKERKEYZZZ\n";
+        let hashed = "|1|F1E2D3C4B5A6=|Zm9vYmFyYmF6cXV4= ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAAAA\n";
+        assert!(matches!(
+            compare_host_keys(scanned, hashed, &ep),
+            HostKeyStatus::Mismatch { .. }
+        ));
     }
 ```
 
@@ -1385,7 +1408,8 @@ pub enum HostKeyStatus {
 }
 
 /// known_hosts 的 host 欄位寫法：22 埠是裸主機名，其他埠是 `[host]:port`。
-fn known_hosts_host_field(ep: &Endpoint) -> String {
+/// 這也是 `ssh-keygen -F` 期望的查詢字串形式。
+pub fn known_hosts_host_field(ep: &Endpoint) -> String {
     if ep.port == "22" {
         ep.hostname.clone()
     } else {
@@ -1406,13 +1430,27 @@ fn split_key_line(line: &str) -> Option<(&str, &str)> {
     Some((key_type, material))
 }
 
-/// 比對 `ssh-keyscan` 的輸出與 known_hosts 內容。
+/// 查詢這台 host 既有的 known_hosts 項目所需的 argv（不含程式名）。
 ///
-/// 只比對同一台 host 欄位下的 (type, base64)。掃到多把金鑰（ed25519 + rsa）時，
-/// 只要 known_hosts 裡有任何一把相符即視為已信任 —— 這與 ssh 自己的行為一致。
+/// **刻意用 `ssh-keygen -F` 而不是自己讀 known_hosts 檔案。** 原因：known_hosts 可以是
+/// 雜湊過的（`|1|salt|hash` 開頭），而 Debian／Ubuntu 的 `HashKnownHosts` 預設就是 `yes`。
+/// 自己用字面 host 欄位比對，在那些系統上永遠比不中 —— 後果不只是每次都要重新確認指紋，
+/// 而是**已信任主機的金鑰被換掉時會被判成 `New` 而不是 `Mismatch`**，中間人攻擊會顯示成
+/// 「新主機，要信任嗎？」而不是硬中止。`ssh-keygen -F` 原生處理雜湊項目，這正是它存在的理由。
+pub fn keygen_find_args(ep: &Endpoint) -> Vec<String> {
+    vec!["-F".to_string(), known_hosts_host_field(ep)]
+}
+
+/// 比對 `ssh-keyscan` 的輸出與 `ssh-keygen -F` 回報的既有項目。
+///
+/// `known_for_host` 是 `ssh-keygen -F` 的 stdout —— 它已經只包含這台 host 的項目，
+/// 所以這裡**不再、也不可以**用字面 host 欄位過濾（雜湊項目的第一欄是 `|1|…`，
+/// 過濾會把它們全部濾掉，等於回到上面說的那個安全性缺口）。
+///
+/// 掃到多把金鑰（ed25519 + rsa）時，只要有任何一把相符即視為已信任 —— 與 ssh 一致。
 pub fn compare_host_keys(
     scanned: &str,
-    known_hosts_text: &str,
+    known_for_host: &str,
     ep: &Endpoint,
 ) -> HostKeyStatus {
     let host_field = known_hosts_host_field(ep);
@@ -1424,15 +1462,8 @@ pub fn compare_host_keys(
         };
     }
 
-    let known_keys: Vec<(&str, &str)> = known_hosts_text
-        .lines()
-        .filter(|l| {
-            l.split_whitespace()
-                .next()
-                .is_some_and(|h| h.split(',').any(|p| p == host_field))
-        })
-        .filter_map(split_key_line)
-        .collect();
+    let known_keys: Vec<(&str, &str)> =
+        known_for_host.lines().filter_map(split_key_line).collect();
 
     // 指紋一律取掃到的第一把，作為要顯示給使用者的代表。
     let (first_type, first_material) = scanned_keys[0];
@@ -1599,7 +1630,14 @@ pub fn deploy_precheck_host_key(
         Err(e) => return Err(AppError::Io(e)),
     };
 
-    let known = crate::known_hosts::read_known_hosts_text()?;
+    // 用 `ssh-keygen -F` 查既有項目，而不是自己讀 known_hosts —— 它原生處理雜湊項目
+    // （HashKnownHosts 在 Debian／Ubuntu 預設為 yes）。找不到時 exit 1、stdout 為空，
+    // 那正是我們要的「這台是新主機」。
+    let known = Command::new("ssh-keygen")
+        .args(keygen_find_args(&ep))
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+        .unwrap_or_default();
     Ok(compare_host_keys(&scanned, &known, &ep))
 }
 
