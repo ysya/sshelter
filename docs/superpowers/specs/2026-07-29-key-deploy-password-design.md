@@ -273,8 +273,29 @@ host row 右鍵 →「Deploy key…」
 | 密碼不進 settings export | `settings_export` 只匯出設定 JSON，不含 keychain |
 | 公鑰 comment 不成為注入點 | 公鑰走 stdin，不拼進遠端指令 |
 | 本機不經 shell | ssh 以純 argv 啟動（遠端 script 由**遠端** shell 解析，本機不解析） |
-| 惡意伺服器騙不走密碼 | helper 的提示文字白名單；且 host key 已於 Step 0 固定 |
+| 惡意伺服器騙不走密碼 | 部署 argv 帶 `-o KbdInteractiveAuthentication=no`，伺服器可控的提示文字根本進不了 helper；再加上白名單與 Step 0 已固定的 host key（見下方 2026-07-30 更正） |
 | 沒勾「記住」時不留痕 | 暫存 keychain 項目，`defer` 語意一律刪除 |
+
+## 2026-07-30 更正：keyboard-interactive 這條路本設計原先漏了
+
+Task 2 的 review 讀了 OpenSSH 原始碼，推翻了本設計原先對 askpass 的兩個假設。三項證據都已獨立查證：
+
+1. **[OpenSSH 8.5 release notes](https://www.openssh.org/txt/release-8.5)**：「ssh(1): Prefix keyboard interactive prompts with "(user@host)" to make it easier to determine which connection they are associated with」。所以 kbdint 的提示**不是**裸的 `Password: `，而是 `(user@host) Password: ` —— 原本設計的白名單比對不到，會拒絕**所有**真正的 kbdint 密碼提示。
+2. **`sshconnect2.c`**：kbdint 走 `asmprintf(&display_prompt, …, "(%s@%s) %s", …)` 後 `read_passphrase(display_prompt, echo ? RP_ECHO : 0)`；password 認證走 `xasprintf(&prompt, "%s@%s's password: ", …)` 後 `read_passphrase(prompt, 0)`。**兩者都沒有 `RP_ALLOW_EOF`。**
+3. **`readpass.c`**：`if ((ret = ssh_askpass(...)) == NULL) if (!(flags & RP_ALLOW_EOF)) return xstrdup("");`
+
+合起來的結論：**helper 的 exit 1 不代表「安全放棄」，而是讓 ssh 送出一個空密碼**，在遠端留下一筆真實的失敗認證（會計入 fail2ban / PAM tally）。而 ssh 預設的 `PreferredAuthentications` 把 `keyboard-interactive` 排在 `password` **前面**，本設計又刻意不覆寫它 —— 所以一般主機會先白送一次空密碼，只提供 kbdint 的主機（PAM 2FA、`PasswordAuthentication no`）則永遠失敗，且會被 `classify_outcome` 誤報成「密碼錯誤」。
+
+另外，原本的白名單規則 `ends_with("'s password:")` 只要插入兩個字元就能繞過（`Please enter your account's password:`），而 `contains("passphrase for")` 是對攻擊者可控字串做無錨定子字串比對。
+
+**Task 0 的 spike 沒抓到這一切，是因為它用了 `-o PreferredAuthentications=password`，正好強制走本設計明說不強制的那條路。白名單「接受」側對真實認證路徑的覆蓋率是零。這是驗證設計的疏漏。**
+
+**修正（使用者已裁定「兩道都做」）：**
+
+- **部署 argv 加 `-o KbdInteractiveAuthentication=no`**（client 端合法選項，預設 `yes`，已查 `ssh_config(5)`）。伺服器可控的文字從結構上進不了 helper —— 與 Step 0 用 `StrictHostKeyChecking=yes` 消除 host key 提示是同一個思路。代價：只提供 kbdint 的主機無法自動部署，但會乾淨失敗。
+- **白名單改成兩端錨定**：有 `(user@host) ` 前綴 → 剝除後只接受完全等於 `password:`；無前綴 → 只接受 `<user>@<host>'s password:`（user/host 不得含空白）與開頭錨定的 `Enter passphrase for `。永不使用 `contains`，含換行一律拒絕。
+- 空密碼一律視為「沒有密碼」；stdout 寫入或 flush 失敗時 exit 1 而非 0（否則 ssh 會把半截密碼送出去）。
+- helper 的診斷紀錄走 stderr 並帶 `[sshelter-askpass]` 前綴，`classify_outcome` 需濾掉這些行。
 
 ## 邊界情況與風險
 

@@ -328,11 +328,58 @@ git commit -m "feat(secrets): add OS keychain wrapper for per-host passwords"
 
 /// 只回應真正的密碼／passphrase 提示。
 ///
-/// 刻意比「結尾是 password:」更嚴格 —— 伺服器自訂的
-/// `Please enter your password:` 必須被拒絕。
+/// 兩端錨定，永遠不用 `contains` —— 對攻擊者可控的字串做無錨定子字串比對等於沒有防禦。
+///
+/// OpenSSH 8.5 起，client 會把 keyboard-interactive 提示加上自己產生的 `(user@host) `
+/// 前綴（`sshconnect2.c` 的 `asmprintf(&display_prompt, …, "(%s@%s) %s", …)`），前綴
+/// 「之後」的文字則完全由伺服器控制。因此：有前綴 → 剝掉後只接受完全等於 `password:`；
+/// 無前綴 → 是 client 自己組的固定形狀，逐一錨定比對。
 pub fn prompt_is_answerable(prompt: &str) -> bool {
-    let p = prompt.trim().to_ascii_lowercase();
-    p == "password:" || p.ends_with("'s password:") || p.contains("passphrase for")
+    // 多行提示只有 host key 確認一種，一律拒絕。
+    if prompt.contains('\n') {
+        return false;
+    }
+    let trimmed = prompt.trim();
+
+    if let Some(rest) = strip_kbdint_prefix(trimmed) {
+        return rest.trim().eq_ignore_ascii_case("password:");
+    }
+
+    let lower = trimmed.to_ascii_lowercase();
+    is_client_password_prompt(&lower) || lower.starts_with("enter passphrase for ")
+}
+
+/// 剝除 client 產生的 `(user@host) ` 前綴；沒有前綴時回 `None`。
+/// 前綴內容由 `"%s@%s"` 組成，不含空白。
+fn strip_kbdint_prefix(s: &str) -> Option<&str> {
+    let rest = s.strip_prefix('(')?;
+    let close = rest.find(')')?;
+    let inside = &rest[..close];
+    if inside.is_empty() || inside.contains(char::is_whitespace) || !inside.contains('@') {
+        return None;
+    }
+    Some(rest[close + 1..].trim_start())
+}
+
+/// `<user>@<host>'s password:` —— user 與 host 皆非空且不得含空白。
+/// 這道形狀檢查正是 `Please enter your account's password:` 被擋下的原因。
+fn is_client_password_prompt(lower: &str) -> bool {
+    let Some(head) = lower.strip_suffix("'s password:") else {
+        return false;
+    };
+    if head.contains(char::is_whitespace) {
+        return false;
+    }
+    match head.split_once('@') {
+        Some((user, host)) => !user.is_empty() && !host.is_empty(),
+        None => false,
+    }
+}
+
+/// 診斷紀錄一律走 stderr —— stdout 是 ssh 讀取答案的通道，寫任何東西進去都會被當成密碼。
+/// 絕不記錄密碼本身。前綴讓 `deploy::classify_outcome` 能濾掉這些行。
+fn log_decision(prompt: &str, decision: &str) {
+    eprintln!("[sshelter-askpass] {decision}: {prompt:?}");
 }
 
 #[cfg(test)]
@@ -392,21 +439,35 @@ Expected: 4 passed
 
 ```rust
 /// 取得要回覆的密碼：優先用環境變數 fallback（本機無密鑰環時），否則查 keychain。
+///
+/// 空字串一律當成「沒有密碼」。否則 `run()` 會印出一行空白並 exit 0，而 ssh 會把那個
+/// 空字串當成密碼送給伺服器（見 `run()` 的說明）。
 pub fn resolve_secret(account: &str, env_secret: Option<String>) -> Option<String> {
     if let Some(s) = env_secret {
-        return Some(s);
+        return if s.is_empty() { None } else { Some(s) };
     }
-    crate::secrets::get(account).ok().flatten()
+    crate::secrets::get(account)
+        .ok()
+        .flatten()
+        .filter(|s| !s.is_empty())
 }
 
 /// helper 模式進入點。永不返回。
 ///
-/// 退出碼：0 = 已把密碼寫到 stdout；1 = 拒絕回答（提示不在白名單、或查不到密碼）。
+/// 退出碼：0 = 已把密碼完整寫到 stdout；1 = 沒有回答。
+///
+/// **重要：exit 1 不等於「ssh 會安全地放棄」。** `readpass.c` 的 `read_passphrase` 在
+/// askpass 失敗時，若呼叫端沒帶 `RP_ALLOW_EOF` 就 `return xstrdup("")`，而
+/// `sshconnect2.c` 的兩個認證呼叫點都沒帶。也就是說 exit 1 會讓 ssh 送出一個「空密碼」，
+/// 在遠端留下一筆真實的失敗認證。只有 host key 的 `confirm()` 會把空字串當成 "no" 而
+/// 安全失敗。這正是部署 argv 必須帶 `-o KbdInteractiveAuthentication=no` 的原因：讓
+/// 伺服器可控的提示根本不會出現，helper 就不必在「洩漏」與「送空密碼」之間二選一。
 pub fn run() -> ! {
     use std::io::Write;
 
     let prompt = std::env::args().nth(1).unwrap_or_default();
     if !prompt_is_answerable(&prompt) {
+        log_decision(&prompt, "refused");
         std::process::exit(1);
     }
 
@@ -417,12 +478,18 @@ pub fn run() -> ! {
         Some(secret) => {
             let stdout = std::io::stdout();
             let mut lock = stdout.lock();
-            // ssh 讀一行；結尾必須有換行。
-            let _ = writeln!(lock, "{secret}");
-            let _ = lock.flush();
+            // ssh 讀一行；結尾必須有換行。寫入或 flush 失敗時絕不能 exit 0 ——
+            // 那會讓 ssh 把「只寫出一半的密碼前綴」當成答案送給對方。
+            if writeln!(lock, "{secret}").is_err() || lock.flush().is_err() {
+                log_decision(&prompt, "write-failed");
+                std::process::exit(1);
+            }
             std::process::exit(0);
         }
-        None => std::process::exit(1),
+        None => {
+            log_decision(&prompt, "no-secret");
+            std::process::exit(1)
+        }
     }
 }
 ```
@@ -613,6 +680,13 @@ pub fn build_deploy_argv(alias: &str) -> Vec<String> {
         "-o".to_string(), "BatchMode=no".to_string(),
         // 密碼錯就立刻失敗，不問三次。
         "-o".to_string(), "NumberOfPasswordPrompts=1".to_string(),
+        // 關掉 keyboard-interactive。這是安全關鍵，不是效能調校：kbdint 的提示文字由
+        // 「伺服器」控制，而 OpenSSH 只在前面加一個 client 產生的 `(user@host) ` 前綴就
+        // 原文轉交 askpass。關掉之後，helper 收到的提示全部由 client 產生，惡意主機再也
+        // 無法構造提示來誘騙 helper 印出密碼。與 Step 0 用 StrictHostKeyChecking=yes
+        // 消除 host key 提示是同一個思路：讓危險的輸入根本不存在，而不是事後過濾。
+        // 代價：只提供 kbdint 的主機（PAM 2FA 等）無法自動部署，但會「乾淨地」失敗。
+        "-o".to_string(), "KbdInteractiveAuthentication=no".to_string(),
         "-o".to_string(), "ConnectTimeout=10".to_string(),
         alias.to_string(),
         REMOTE_SCRIPT.to_string(),
@@ -631,6 +705,14 @@ mod tests {
         assert!(argv.contains(&"BatchMode=no".to_string()));
         assert!(argv.contains(&"NumberOfPasswordPrompts=1".to_string()));
         assert!(argv.contains(&"ConnectTimeout=10".to_string()));
+    }
+
+    #[test]
+    fn argv_disables_keyboard_interactive() {
+        // 安全關鍵：kbdint 的提示文字由伺服器控制，關掉它才能保證 askpass helper
+        // 收到的提示全部是 client 產生的。移掉這個選項會讓白名單重新暴露在
+        // 伺服器可控的輸入之下。
+        assert!(build_deploy_argv("web").contains(&"KbdInteractiveAuthentication=no".to_string()));
     }
 
     #[test]
@@ -785,11 +867,13 @@ pub fn classify_outcome(code: Option<i32>, stdout: &str, stderr: &str) -> Deploy
 }
 
 /// 取 stderr 第一行非空內容，作為給使用者看的訊息。
+/// askpass helper 的診斷行也走 stderr（見 `askpass::log_decision`），要濾掉 ——
+/// 否則使用者看到的錯誤訊息會變成我們自己的除錯輸出。
 fn first_line_or(stderr: &str, fallback: &str) -> String {
     stderr
         .lines()
         .map(str::trim)
-        .find(|l| !l.is_empty())
+        .find(|l| !l.is_empty() && !l.starts_with("[sshelter-askpass]"))
         .unwrap_or(fallback)
         .to_string()
 }
