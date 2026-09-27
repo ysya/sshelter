@@ -717,6 +717,11 @@ mod tests {
             format!("# c\nInclude {INCLUDE_VALUE}\nAddKeysToAgent yes\nInclude ~/.ssh/a.config\nHost a\n")
         );
         assert!(!ensure_include(&mut items));
+        // 已在首行、但排在別的路徑後面(`Include a ours`):ssh 會先讀 a,所以仍要正規化成獨立一行。
+        let (mut items, _) = parse_file("Include ~/.ssh/a.config ~/.ssh/sshelter/hosts.config\nHost a\n");
+        assert!(ensure_include(&mut items));
+        assert_eq!(serialize_items(&items, true), format!("Include {INCLUDE_VALUE}\nInclude ~/.ssh/a.config\nHost a\n"));
+        assert!(!ensure_include(&mut items));
     }
 
     #[test]
@@ -853,8 +858,11 @@ fn sync_include_index(items: &[Item]) -> usize {
 /// 回傳是否改了 items。
 pub fn ensure_include(items: &mut Vec<Item>) -> bool {
     let top = sync_include_index(items);
+    // 「已經正確」= 在最頂端、而且那一行只有我們這一個路徑。多路徑的 `Include a ours` 就算在首行,
+    // ssh 也會先讀 a —— 一律正規化成獨立的一行。
+    let exact = |item: &Item| matches!(item, Item::Directive(d) if d.key == "include" && d.enabled && d.value.trim() == INCLUDE_VALUE);
     match items.iter().position(is_our_include) {
-        Some(pos) if pos == top => false,
+        Some(pos) if pos == top && exact(&items[pos]) => false,
         Some(pos) => {
             let leftover: Vec<String> = match &items[pos] {
                 Item::Directive(d) => d
@@ -871,7 +879,7 @@ pub fn ensure_include(items: &mut Vec<Item>) -> bool {
                 d.value = leftover.join(" ");
                 d.dirty = true;
             }
-            // `pos > top`(Include 是 Directive,不可能在前導註解區裡),移除不影響 top。
+            // `pos >= top`(Include 是 Directive,不可能在前導註解區裡):移除或就地改寫都不影響 top。
             items.insert(top, Item::Directive(Directive::new("Include", INCLUDE_VALUE, "")));
             true
         }
