@@ -6,7 +6,7 @@
 
 **Architecture:** 新增 `src-tauri/src/sync/` 模組樹,每個檔案一個責任;所有函式為純函式或只碰明確傳入的路徑,網路層以 `mockito` 假伺服器測試。後續 A2(relay Worker)與 A3(engine + UI)只依賴本計畫定義的介面。
 
-**Tech Stack:** Rust 2021、`bip39 2`(rand)、`hkdf 0.12` + `sha2 0.10`、`hmac 0.12`、`chacha20poly1305 0.10`、`reqwest 0.12`(blocking/json/rustls-tls)、`mockito 1`(dev)。
+**Tech Stack:** Rust 2021、`bip39 2`(rand)、`hkdf 0.12` + `sha2 0.10`、`hmac 0.12`、`chacha20poly1305 0.10`、`reqwest 0.13`(blocking/json;與 lockfile 既有的 `reqwest 0.13.4` 共用同一份,預設 rustls)、`mockito 1`(dev)。
 
 **Spec:** `docs/superpowers/specs/2026-09-27-sync-chain-design.md`(§3 資料模型、§4 密碼學、§5 中繼 API、§6 狀態檔)
 
@@ -17,15 +17,20 @@
 - 私鑰、助記詞、密碼**永不**進 log、error message、toast。
 - 本機落地權限:狀態檔 0600(`fsutil::atomic_write(path, bytes, 0o600)`)、目錄 0700(`fsutil::ensure_dir_secure`)。
 - 每個 task 結束都要 `cd src-tauri && cargo test` 綠燈後才 commit;commit 只含該 task 的檔案。
-- 加密參數固定:XChaCha20-Poly1305、24-byte 隨機 nonce、AAD = `chain_id + "\n" + kind + "\n" + id`;HKDF-SHA256 salt = `b"sshelter-sync-v1"`。
+- 加密參數固定(spec §4 的 byte-level 定義):XChaCha20-Poly1305、24-byte 隨機 nonce、AAD = `chain_id + "\n" + kind + "\n" + id_hash`(綁 `id_hash`,**不是**明文 id);`id_hash = hex(HMAC-SHA256(enc_key, kind + "\n" + id))`;HKDF-SHA256 salt = `b"sshelter-sync-v1"`,info = `sshelter/v1/chain-id` / `sshelter/v1/auth` / `sshelter/v1/enc`。已知答案向量釘在 Task 1 測試,不得改動。
+- relay URL 只接受 `https://`;`http://` 只允許 loopback host(`127.0.0.1`、`localhost`、`[::1]`);HTTP client 不跟隨 redirect(bearer token 有整條 chain 的權限)。
+- `sync-state.json` 只保存 host/device/meta 的明文記錄;其他種類(key/password/未知)只以原始密文 envelope 存在 `sealed`,絕不解密進狀態檔。
+- 受管檔中含 wildcard 字元(`*`、`?`、`!`)的 Host 區塊是裝置本地結構:不擷取、不套用、不刪除。
 
 ## Review Focus
 
 1. 助記詞輸入含大寫、多餘空白、換行、全形空白 —— 應正規化後接受;錯字/字數錯要回可讀錯誤(Task 1 `normalize_mnemonic` 測試)。
-2. 受管同步檔被手改成含頂部註解、空行、甚至 `Host *` —— `blocks_of` 只取 Host 區塊,`apply_host_text` 不得動到其他項目(Task 3 測試)。
+2. 受管同步檔被手改成含頂部註解、空行、甚至 `Host *` —— `blocks_of` 只取具名 Host 區塊(wildcard 略過),`apply_host_text`/`remove_host_block` 不得動到其他項目或 wildcard 區塊(Task 3 測試)。
 3. 中繼不可達(連線拒絕)—— client 必須在 connect timeout 內回 `Err`,不可掛住(Task 5 測試)。
 4. 中繼回傳非預期 JSON / 5xx —— 必須映射成 `AppError::Other` 而非 panic(Task 5 測試)。
 5. 狀態檔損毀或版本較新 —— `load` 回可辨識錯誤,呼叫端可視為「未加入」(Task 4 測試)。
+6. 使用者把 relay URL 填成 `http://sync.example.com` —— 必須拒絕(bearer token 會明文外洩);`http://127.0.0.1:8787` 仍可用(Task 5 測試)。
+7. 主 config 已有別的 `Include` 在前 —— 同步 Include 仍要插在它們之前,否則 spec §10 的遮蔽承諾不成立(Task 3 測試)。
 
 ---
 
@@ -57,8 +62,10 @@ bip39 = { version = "2", features = ["rand"] }
 hkdf = "0.12"
 hmac = "0.12"
 chacha20poly1305 = "0.10"
-reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+reqwest = { version = "0.13", features = ["blocking", "json"] }
 ```
+
+(`reqwest 0.13` 的預設 features 已含 rustls(`default-tls`)、`http2`、`system-proxy`;lockfile 裡已經有 tauri 相依帶進來的 `reqwest 0.13.4`,指定 `0.13` 會合併成同一份而不是再編一份 0.12。)
 
 在 `[dev-dependencies]` 加入:
 
@@ -66,8 +73,8 @@ reqwest = { version = "0.12", default-features = false, features = ["blocking", 
 mockito = "1"
 ```
 
-Run: `cd src-tauri && cargo fetch`
-Expected: 解析成功,無版本衝突(`sha2 0.10` 與 `hkdf 0.12`/`hmac 0.12` 相容)。
+Run: `cd src-tauri && cargo fetch && cargo tree -i reqwest --depth 0`
+Expected: 解析成功,無版本衝突(`sha2 0.10` 與 `hkdf 0.12`/`hmac 0.12` 相容);`cargo tree` 只列出一個 `reqwest v0.13.x`。
 
 - [ ] **Step 2: 建立模組骨架**
 
@@ -139,6 +146,19 @@ mod tests {
         assert_ne!(a.chain_id, a.auth_token);
         let other = generate_mnemonic().unwrap();
         assert_ne!(derive_keys(&other).unwrap().chain_id, a.chain_id);
+    }
+
+    #[test]
+    fn derivation_matches_pinned_vectors() {
+        // spec §4 的已知答案向量(PBKDF2-HMAC-SHA512 → HKDF-SHA256 → hex)。
+        // 改了 salt、info、分隔符或編碼,這裡就會炸 —— 這是互通性的護欄,不得更新數值遷就實作。
+        let keys = derive_keys(WORDS).unwrap();
+        assert_eq!(keys.chain_id, "4eb6631d45882eb3a0c2541383de4263fc056a1bc851718d66d2f664ae77bf4c");
+        assert_eq!(keys.auth_token, "8bef1a101b57ae1888a071b3e559b4253eb06572ff4fd021b5ef1ab97747e543");
+        assert_eq!(
+            id_hash(&keys, "host", "web-1"),
+            "41fc9eb6d727b31a34350586bcee7619a7983fd8d695e7bebde44e51e937113a"
+        );
     }
 
     #[test]
@@ -258,7 +278,9 @@ pub fn derive_keys(mnemonic: &str) -> Result<ChainKeys, AppError> {
 
 /// 中繼看到的記錄識別:HMAC-SHA256(enc_key, kind || "\n" || id),連 alias 都不外洩。
 pub fn id_hash(keys: &ChainKeys, kind: &str, id: &str) -> String {
-    let mut mac = Hmac::<Sha256>::new_from_slice(&keys.enc_key)
+    // `chacha20poly1305::aead::KeyInit` 與 `hmac::Mac` 都提供 `new_from_slice`;
+    // 不指名 trait 會是 E0034(multiple applicable items in scope)。
+    let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(&keys.enc_key)
         .expect("HMAC accepts any key length");
     mac.update(kind.as_bytes());
     mac.update(b"\n");
@@ -316,7 +338,7 @@ pub fn open(keys: &ChainKeys, kind: &str, id_hash: &str, sealed: &Sealed) -> Res
 - [ ] **Step 6: 執行測試確認通過**
 
 Run: `cd src-tauri && cargo test sync::crypto 2>&1 | tail -5`
-Expected: `6 passed`。
+Expected: `7 passed`。`derivation_matches_pinned_vectors` 若失敗,錯的是實作(對照 spec §4 逐項檢查 salt/info/`\n` 分隔/hex 小寫),不是向量。
 
 - [ ] **Step 7: Commit**
 
@@ -345,6 +367,7 @@ git commit -m "feat(sync): mnemonic, key derivation and record encryption"
   - `pub struct DevicePayload { pub schema: u32, pub name: String, pub platform: String, pub joined_at_ms: u64, pub last_seen_ms: u64, pub keys: Vec<String> }`
   - `pub struct MetaPayload { pub schema_version: u32, pub created_by_app_version: String }`
   - `pub const SCHEMA_VERSION: u32 = 1;`
+  - `pub struct Envelope { pub id_hash: String, pub kind: String, pub seq: u64, pub nonce: String, pub ciphertext: String, pub deleted: bool }`(serde `rename_all = "camelCase"`:wire 欄位 `idHash`…;Task 4 的 `SyncState.sealed` 與 Task 5 的 client 共用)
 
 - [ ] **Step 1: 寫失敗的測試**
 
@@ -424,6 +447,22 @@ mod tests {
         assert_eq!(v["schema"], 1);
         let back: HostPayload = serde_json::from_value(v).unwrap();
         assert_eq!(back.text, "Host a\n");
+    }
+
+    #[test]
+    fn envelope_uses_camel_case_wire_names() {
+        let env = Envelope {
+            id_hash: "h".into(),
+            kind: "host".into(),
+            seq: 3,
+            nonce: "n".into(),
+            ciphertext: "c".into(),
+            deleted: false,
+        };
+        let json = serde_json::to_string(&env).unwrap();
+        assert!(json.contains("\"idHash\":\"h\""), "got {json}");
+        assert!(!json.contains("id_hash"));
+        assert_eq!(serde_json::from_str::<Envelope>(&json).unwrap(), env);
     }
 }
 ```
@@ -529,6 +568,19 @@ pub fn merge(local: Option<&LocalRecord>, remote: &Record) -> MergeOutcome {
     }
 }
 
+/// 中繼往返的密文信封(wire 格式 camelCase,對應 relay Worker 與 Task 5 的 client)。
+/// 也是 `SyncState.sealed` 保留「本版不處理的種類」時的原樣儲存格式。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Envelope {
+    pub id_hash: String,
+    pub kind: String,
+    pub seq: u64,
+    pub nonce: String,
+    pub ciphertext: String,
+    pub deleted: bool,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct HostPayload {
     pub schema: u32,
@@ -560,13 +612,13 @@ pub struct MetaPayload {
 - [ ] **Step 4: 執行測試確認通過**
 
 Run: `cd src-tauri && cargo test sync::record 2>&1 | tail -5`
-Expected: `6 passed`。
+Expected: `7 passed`。
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add src-tauri/src/sync/mod.rs src-tauri/src/sync/record.rs
-git commit -m "feat(sync): record model with last-writer-wins merge"
+git commit -m "feat(sync): record model, wire envelope and last-writer-wins merge"
 ```
 
 ---
@@ -578,16 +630,17 @@ git commit -m "feat(sync): record model with last-writer-wins merge"
 - Modify: `src-tauri/src/sync/mod.rs`(加 `pub mod hosts_file;`)
 
 **Interfaces:**
-- Consumes: `crate::config::model::{Item, HostBlock}`、`crate::config::parser::parse_file(&str) -> (Vec<Item>, bool)`、`crate::config::serialize::serialize_items(&[Item], bool) -> String`、`crate::config::newfile::include_insert_index(&[Item]) -> usize`、`crate::config::model::Directive::new(keyword, value, indent)`、`crate::fsutil::{ensure_dir_secure, atomic_write}`
+- Consumes: `crate::config::model::{Item, HostBlock}`(`Item` 變體:`Blank(String)`、`Comment(String)`、`Directive(Directive)`、`Host(HostBlock)`、`Match(MatchBlock)`)、`crate::config::parser::parse_file(&str) -> (Vec<Item>, bool)`、`crate::config::serialize::serialize_items(&[Item], bool) -> String`、`crate::config::model::Directive::new(keyword, value, indent)`、`crate::fsutil::{ensure_dir_secure, atomic_write}`
 - Produces:
   - `pub const INCLUDE_VALUE: &str = "~/.ssh/sshelter/hosts.config";`
   - `pub fn managed_path(ssh_dir: &Path) -> PathBuf`(`<ssh_dir>/sshelter/hosts.config`)
   - `pub fn ensure_managed_file(ssh_dir: &Path) -> Result<PathBuf, AppError>`
-  - `pub fn ensure_include(items: &mut Vec<Item>) -> bool`(插入了回 true)
+  - `pub fn ensure_include(items: &mut Vec<Item>) -> bool`(插入了回 true;位置 = 前導註解/空行之後、其他任何項目之前 —— **不是** `newfile::include_insert_index`)
+  - `pub fn is_syncable_alias(alias: &str) -> bool`(非空且不含 `*`、`?`、`!`)
   - `pub struct HostBlockText { pub alias: String, pub text: String }`
-  - `pub fn blocks_of(items: &[Item]) -> Vec<HostBlockText>`
-  - `pub fn apply_host_text(items: &mut Vec<Item>, alias: &str, text: &str) -> Result<bool, AppError>`(內容改變才回 true)
-  - `pub fn remove_host_block(items: &mut Vec<Item>, alias: &str) -> bool`
+  - `pub fn blocks_of(items: &[Item]) -> Vec<HostBlockText>`(只取 `is_syncable_alias` 的 Host 區塊)
+  - `pub fn apply_host_text(items: &mut Vec<Item>, alias: &str, text: &str) -> Result<bool, AppError>`(內容改變才回 true;wildcard alias 回 Err)
+  - `pub fn remove_host_block(items: &mut Vec<Item>, alias: &str) -> bool`(wildcard alias 一律 false)
 
 - [ ] **Step 1: 寫失敗的測試**
 
@@ -600,7 +653,6 @@ git commit -m "feat(sync): record model with last-writer-wins merge"
 use std::path::{Path, PathBuf};
 
 use crate::config::model::{Directive, Item};
-use crate::config::newfile::include_insert_index;
 use crate::config::parser::parse_file;
 use crate::config::serialize::serialize_items;
 use crate::error::AppError;
@@ -611,6 +663,7 @@ mod tests {
     use super::*;
 
     const FILE: &str = "# synced by sshelter\n\nHost web-1\n  HostName 10.0.0.9\n  #tags: prod, web\n\nHost db-1\n  HostName 10.0.0.10\n";
+    const WITH_WILDCARD: &str = "Host *\n  ServerAliveInterval 30\n\nHost web-1\n  HostName 10.0.0.9\n\nHost *.internal !bad.internal\n  User ops\n";
 
     #[test]
     fn managed_path_lives_under_ssh_dir() {
@@ -630,12 +683,40 @@ mod tests {
     }
 
     #[test]
-    fn ensure_include_inserts_before_first_host_and_is_idempotent() {
-        let (mut items, _) = parse_file("# main\nHost a\n  HostName 1\n");
+    fn ensure_include_goes_to_the_very_top_and_is_idempotent() {
+        // 前導註解/空行之後、既有 Include 與全域指令之前:同步檔必須是 ssh 第一個讀到的定義
+        // (first-obtained-wins),spec §10 的「同步主機遮蔽本地同名主機」才成立。
+        let (mut items, _) = parse_file("# main\n\nInclude ~/.ssh/other.config\nAddKeysToAgent yes\nHost a\n  HostName 1\n");
         assert!(ensure_include(&mut items));
         assert!(!ensure_include(&mut items));
         let text = serialize_items(&items, true);
-        assert_eq!(text, format!("# main\nInclude {INCLUDE_VALUE}\nHost a\n  HostName 1\n"));
+        assert_eq!(
+            text,
+            format!("# main\n\nInclude {INCLUDE_VALUE}\nInclude ~/.ssh/other.config\nAddKeysToAgent yes\nHost a\n  HostName 1\n")
+        );
+        // 空檔:就是第一行。
+        let (mut empty, _) = parse_file("");
+        assert!(ensure_include(&mut empty));
+        assert_eq!(serialize_items(&empty, true), format!("Include {INCLUDE_VALUE}\n"));
+    }
+
+    #[test]
+    fn wildcard_blocks_are_neither_extracted_nor_touched() {
+        let (mut items, _) = parse_file(WITH_WILDCARD);
+        let aliases: Vec<&str> = blocks_of(&items).iter().map(|b| b.alias.as_str()).collect();
+        assert_eq!(aliases, vec!["web-1"]);
+        // 遠端送來 wildcard alias 的記錄:拒絕、不套用。
+        assert!(apply_host_text(&mut items, "*", "Host *\n  User root\n").is_err());
+        assert!(apply_host_text(&mut items, "*.internal", "Host *.internal\n").is_err());
+        // tombstone 也刪不到 wildcard 區塊。
+        assert!(!remove_host_block(&mut items, "*"));
+        assert!(!remove_host_block(&mut items, "*.internal"));
+        assert_eq!(serialize_items(&items, true), WITH_WILDCARD);
+        assert!(!is_syncable_alias("*"));
+        assert!(!is_syncable_alias("web?"));
+        assert!(!is_syncable_alias("!web"));
+        assert!(!is_syncable_alias(""));
+        assert!(is_syncable_alias("web-1"));
     }
 
     #[test]
@@ -715,14 +796,40 @@ fn is_our_include(item: &Item) -> bool {
     matches!(item, Item::Directive(d) if d.key == "include" && d.enabled && d.value.split_whitespace().any(|t| t == INCLUDE_VALUE))
 }
 
-/// 主 config 若尚未 Include 受管檔,插在正確位置(top-level、第一個 Host/Match 之前)。
+/// 同步 Include 的位置:前導註解/空行之後、其他任何項目(既有 Include、全域指令、Host/Match)之前。
+/// 刻意不用 `newfile::include_insert_index`(它插在最後一個 Include **之後**):ssh 是
+/// first-obtained-wins,同步檔必須是第一個被讀到的定義,spec §10 的遮蔽承諾才成立。
+fn sync_include_index(items: &[Item]) -> usize {
+    items
+        .iter()
+        .position(|i| !matches!(i, Item::Blank(_) | Item::Comment(_)))
+        .unwrap_or(items.len())
+}
+
+/// 主 config 若尚未 Include 受管檔,插在最頂端(見 `sync_include_index`)。
 pub fn ensure_include(items: &mut Vec<Item>) -> bool {
     if items.iter().any(is_our_include) {
         return false;
     }
-    let idx = include_insert_index(items);
+    let idx = sync_include_index(items);
     items.insert(idx, Item::Directive(Directive::new("Include", INCLUDE_VALUE, "")));
     true
+}
+
+/// 具名主機才同步;含 wildcard/否定字元的 pattern(`Host *`、`Host *.internal`、`!x`)
+/// 是裝置本地的 config 結構 —— 不擷取、不套用、不刪除。
+pub fn is_syncable_alias(alias: &str) -> bool {
+    !alias.is_empty() && !alias.contains(['*', '?', '!'])
+}
+
+/// 第一個 pattern 等於 `alias` 的 Host 區塊位置;wildcard alias 一律 None(連找都不找)。
+fn syncable_host_position(items: &[Item], alias: &str) -> Option<usize> {
+    if !is_syncable_alias(alias) {
+        return None;
+    }
+    items
+        .iter()
+        .position(|i| matches!(i, Item::Host(h) if h.patterns.first().map(String::as_str) == Some(alias)))
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -736,15 +843,16 @@ fn block_text(item: &Item) -> String {
     serialize_items(std::slice::from_ref(item), true)
 }
 
-/// 只取 Host 區塊;alias = 第一個 pattern。註解、空行、Match 區塊一律略過。
+/// 只取具名 Host 區塊;alias = 第一個 pattern。註解、空行、Match 與 wildcard 區塊一律略過。
 pub fn blocks_of(items: &[Item]) -> Vec<HostBlockText> {
     items
         .iter()
         .filter_map(|item| match item {
-            Item::Host(h) => h.patterns.first().map(|alias| HostBlockText {
-                alias: alias.clone(),
-                text: block_text(item),
-            }),
+            Item::Host(h) => h
+                .patterns
+                .first()
+                .filter(|alias| is_syncable_alias(alias))
+                .map(|alias| HostBlockText { alias: alias.clone(), text: block_text(item) }),
             _ => None,
         })
         .collect()
@@ -765,11 +873,13 @@ fn parse_single_host(alias: &str, text: &str) -> Result<Item, AppError> {
     }
 }
 
-/// 以原始文字替換(或附加)一個 Host 區塊。回傳是否真的改了內容。
+/// 以原始文字替換(或附加)一個具名 Host 區塊。回傳是否真的改了內容;wildcard alias 回 Err。
 pub fn apply_host_text(items: &mut Vec<Item>, alias: &str, text: &str) -> Result<bool, AppError> {
+    if !is_syncable_alias(alias) {
+        return Err(AppError::Other(format!("'{alias}' is a wildcard pattern; wildcard blocks are never synced")));
+    }
     let incoming = parse_single_host(alias, text)?;
-    let pos = items.iter().position(|i| matches!(i, Item::Host(h) if h.patterns.first().map(String::as_str) == Some(alias)));
-    match pos {
+    match syncable_host_position(items, alias) {
         Some(p) => {
             if block_text(&items[p]) == block_text(&incoming) {
                 return Ok(false);
@@ -784,10 +894,15 @@ pub fn apply_host_text(items: &mut Vec<Item>, alias: &str, text: &str) -> Result
     }
 }
 
+/// 移除一個具名 Host 區塊;wildcard alias 一律 false(tombstone 刪不到本地結構)。
 pub fn remove_host_block(items: &mut Vec<Item>, alias: &str) -> bool {
-    let before = items.len();
-    items.retain(|i| !matches!(i, Item::Host(h) if h.patterns.first().map(String::as_str) == Some(alias)));
-    items.len() != before
+    match syncable_host_position(items, alias) {
+        Some(p) => {
+            items.remove(p);
+            true
+        }
+        None => false,
+    }
 }
 ```
 
@@ -801,7 +916,7 @@ pub fn remove_host_block(items: &mut Vec<Item>, alias: &str) -> bool {
 - [ ] **Step 4: 執行測試確認通過**
 
 Run: `cd src-tauri && cargo test sync::hosts_file 2>&1 | tail -5`
-Expected: `7 passed`。
+Expected: `8 passed`。
 
 - [ ] **Step 5: Commit**
 
@@ -821,12 +936,13 @@ git commit -m "feat(sync): managed hosts file block operations"
 - Modify: `src-tauri/src/sync/mod.rs`(加 `pub mod state;`)
 
 **Interfaces:**
-- Consumes: `crate::secrets::{get, set, delete}`(account 字串)、`crate::sync::record::LocalRecord`
+- Consumes: `crate::secrets::{get, set, delete}`(account 字串;`delete` 對不存在的項目回 `Ok(())`,見 secrets.rs)、`crate::sync::record::{LocalRecord, Envelope, SCHEMA_VERSION}`
 - Produces:
   - `pub const STATE_VERSION: u32 = 1;`
   - `pub const DEFAULT_RELAY_URL: &str`(= `option_env!("SSHELTER_RELAY_URL")` 或 `"http://127.0.0.1:8787"`)
-  - `pub struct SyncState { pub version: u32, pub chain_id: Option<String>, pub device_id: String, pub device_name: String, pub relay_url: String, pub cursor_seq: u64, pub password_sync: bool, pub records: BTreeMap<String, LocalRecord>, pub last_sync_ms: Option<u64>, pub last_error: Option<String> }`
-  - `impl SyncState { pub fn fresh(device_name: &str) -> Result<Self, AppError>; pub fn joined(&self) -> bool }`
+  - `pub struct SyncState { pub version: u32, pub chain_id: Option<String>, pub device_id: String, pub device_name: String, pub relay_url: String, pub cursor_seq: u64, pub password_sync: bool, pub remote_schema_version: Option<u32>, pub records: BTreeMap<String, LocalRecord>, pub sealed: BTreeMap<String, Envelope>, pub last_sync_ms: Option<u64>, pub last_error: Option<String> }`
+    - `records`:只放本版會處理的種類(host/device/meta)的明文快取;`sealed`(key = `"{kind}:{id_hash}"`):本版不處理的種類(key/password/未知)的原始密文 envelope,絕不解密。
+  - `impl SyncState { pub fn fresh(device_name: &str) -> Result<Self, AppError>; pub fn joined(&self) -> bool; pub fn read_only(&self) -> bool }`(`read_only` = `remote_schema_version > SCHEMA_VERSION`)
   - `pub fn state_path() -> Result<PathBuf, AppError>`
   - `pub fn load(path: &Path) -> Result<Option<SyncState>, AppError>`(檔案不存在 → `Ok(None)`)
   - `pub fn save(path: &Path, state: &SyncState) -> Result<(), AppError>`
@@ -870,7 +986,7 @@ use serde::{Deserialize, Serialize};
 use crate::error::AppError;
 use crate::fsutil;
 use crate::secrets;
-use crate::sync::record::LocalRecord;
+use crate::sync::record::{Envelope, LocalRecord, SCHEMA_VERSION};
 
 #[cfg(test)]
 mod tests {
@@ -880,10 +996,36 @@ mod tests {
     fn fresh_state_is_not_joined_and_has_a_device_id() {
         let s = SyncState::fresh("MacBook").unwrap();
         assert!(!s.joined());
+        assert!(!s.read_only());
         assert_eq!(s.device_id.len(), 32);
         assert_eq!(s.device_name, "MacBook");
         assert_eq!(s.version, STATE_VERSION);
         assert_eq!(s.relay_url, DEFAULT_RELAY_URL);
+        assert!(s.sealed.is_empty());
+    }
+
+    #[test]
+    fn read_only_follows_the_persisted_remote_schema_version() {
+        let mut s = SyncState::fresh("A").unwrap();
+        s.remote_schema_version = Some(SCHEMA_VERSION);
+        assert!(!s.read_only());
+        s.remote_schema_version = Some(SCHEMA_VERSION + 1);
+        assert!(s.read_only());
+    }
+
+    #[test]
+    fn sealed_envelopes_survive_save_and_load_without_being_decoded() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sync-state.json");
+        let mut s = SyncState::fresh("A").unwrap();
+        s.sealed.insert(
+            "password:ff".to_string(),
+            Envelope { id_hash: "ff".into(), kind: "password".into(), seq: 4, nonce: "n".into(), ciphertext: "c".into(), deleted: false },
+        );
+        save(&path, &s).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("\"ciphertext\": \"c\""), "envelope is stored verbatim: {text}");
+        assert_eq!(load(&path).unwrap().unwrap().sealed, s.sealed);
     }
 
     #[test]
@@ -961,8 +1103,15 @@ pub struct SyncState {
     pub cursor_seq: u64,
     /// 本機是否參與密碼同步(Phase B 使用;A 只持久化)。
     pub password_sync: bool,
-    /// key = `record_key(kind, id)`。
+    /// chain 的 `meta.schema_version`(收到後持久化);比 `SCHEMA_VERSION` 新 → 唯讀模式。
+    #[serde(default)]
+    pub remote_schema_version: Option<u32>,
+    /// 明文快取,key = `record_key(kind, id)`;只放本版會處理的種類(host/device/meta)。
     pub records: BTreeMap<String, LocalRecord>,
+    /// 本版不處理的種類(key/password/未知 kind)的原始密文 envelope,key = `"{kind}:{id_hash}"`。
+    /// 絕不解密進這裡:祕密只能落在 keychain 或 `~/.ssh/<name>`(spec §2)。
+    #[serde(default)]
+    pub sealed: BTreeMap<String, Envelope>,
     pub last_sync_ms: Option<u64>,
     pub last_error: Option<String>,
 }
@@ -980,7 +1129,9 @@ impl SyncState {
             relay_url: DEFAULT_RELAY_URL.to_string(),
             cursor_seq: 0,
             password_sync: false,
+            remote_schema_version: None,
             records: BTreeMap::new(),
+            sealed: BTreeMap::new(),
             last_sync_ms: None,
             last_error: None,
         })
@@ -988,6 +1139,11 @@ impl SyncState {
 
     pub fn joined(&self) -> bool {
         self.chain_id.is_some()
+    }
+
+    /// chain 用了比本 app 新的格式:只套用可理解的記錄、不上傳(spec §10)。
+    pub fn read_only(&self) -> bool {
+        self.remote_schema_version.is_some_and(|v| v > SCHEMA_VERSION)
     }
 }
 
@@ -1043,14 +1199,14 @@ pub fn clear_mnemonic() -> Result<(), AppError> {
 
 並在 `sync/mod.rs` 加 `pub mod state;`。
 
-> `secrets::delete` 若對「不存在的項目」回錯,`clear_mnemonic` 應吞掉 NotFound 類錯誤 —— 先看
-> `secrets.rs` 的 `delete` 行為(它已在 deploy 流程被用作「回收殘留」,通常容忍不存在),
-> 依實際行為決定是否需要 `.or_else`。
+> `secrets::delete` 對不存在的項目回 `Ok(())`(secrets.rs 已如此,清理路徑可重入),所以
+> `clear_mnemonic` 直接轉發即可;其他錯誤(keychain 不可用、拒絕存取)必須往上傳 ——
+> A3 的 Leave 據此回報「recovery phrase still in keychain」,不得吞掉。
 
 - [ ] **Step 5: 執行測試確認通過**
 
 Run: `cd src-tauri && cargo test sync::state 2>&1 | tail -5`
-Expected: 全綠(unix 上 5 個、Windows 上 4 個)。
+Expected: 全綠(unix 上 7 個、Windows 上 6 個)。
 
 - [ ] **Step 6: Commit**
 
@@ -1068,12 +1224,14 @@ git commit -m "feat(sync): persist local sync state and keep the mnemonic in the
 - Modify: `src-tauri/src/sync/mod.rs`(加 `pub mod relay;`)
 
 **Interfaces:**
+- Consumes: `crate::sync::record::Envelope`(Task 2;relay.rs 以 `pub use` 重新匯出,A3 可從 `relay::Envelope` 取用)
 - Produces(wire 格式為 camelCase JSON,對應 A2 的 Worker):
-  - `pub struct Envelope { pub id_hash: String, pub kind: String, pub seq: u64, pub nonce: String, pub ciphertext: String, pub deleted: bool }`
+  - `pub use crate::sync::record::Envelope;`
   - `pub struct PushItem { pub id_hash: String, pub kind: String, pub nonce: String, pub ciphertext: String, pub deleted: bool, pub base_seq: u64 }`
   - `pub enum PushResult { Accepted { seq: u64 }, Conflict { current: Envelope } }`
   - `pub struct PullResponse { pub records: Vec<Envelope>, pub latest_seq: u64 }`
-  - `pub struct RelayClient` with `pub fn new(base_url: &str, auth_token: &str) -> Result<Self, AppError>`、`pub fn create_chain(&self, chain_id: &str) -> Result<(), AppError>`、`pub fn push(&self, chain_id: &str, items: &[PushItem]) -> Result<Vec<PushResult>, AppError>`、`pub fn pull(&self, chain_id: &str, since: u64) -> Result<PullResponse, AppError>`、`pub fn delete_chain(&self, chain_id: &str) -> Result<(), AppError>`
+  - `pub struct RelayClient` with `pub fn validate_url(base_url: &str) -> Result<String, AppError>`(純驗證:只接受 `https://`,`http://` 僅限 loopback host;回傳正規化 URL)、`pub fn new(base_url: &str, auth_token: &str) -> Result<Self, AppError>`(先 `validate_url`;不跟隨 redirect)、`pub fn create_chain(&self, chain_id: &str) -> Result<(), AppError>`、`pub fn push(&self, chain_id: &str, items: &[PushItem]) -> Result<Vec<PushResult>, AppError>`、`pub fn pull(&self, chain_id: &str, since: u64) -> Result<PullResponse, AppError>`、`pub fn delete_chain(&self, chain_id: &str) -> Result<(), AppError>`
+  - 呼叫端契約:**只能在非 tokio 執行緒呼叫**(同步執行緒或 `tauri::async_runtime::spawn_blocking`);`reqwest::blocking` 在 async runtime 內會 panic。
 
 - [ ] **Step 1: 寫失敗的測試**
 
@@ -1081,13 +1239,15 @@ git commit -m "feat(sync): persist local sync state and keep the mnemonic in the
 
 ```rust
 //! 中繼 HTTP client(spec §5)。只搬密文;所有錯誤映射成 `AppError`,絕不 panic。
-//! 使用 blocking client:同步引擎跑在自己的執行緒,不需要 async。
+//! 使用 blocking client:同步引擎跑在自己的 std 執行緒。**不可在 tokio runtime 內呼叫**
+//! (`reqwest::blocking` 會 panic);Tauri command 要用 `tauri::async_runtime::spawn_blocking`。
 
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
 use crate::error::AppError;
+pub use crate::sync::record::Envelope;
 
 #[cfg(test)]
 mod tests {
@@ -1190,6 +1350,25 @@ mod tests {
     #[test]
     fn rejects_relay_url_without_scheme() {
         assert!(RelayClient::new("sync.example.com", "tok").is_err());
+        assert!(RelayClient::new("", "tok").is_err());
+    }
+
+    #[test]
+    fn rejects_plain_http_except_loopback() {
+        // bearer token 有整條 chain 的權限:非 loopback 一律要 https。
+        assert!(RelayClient::new("http://sync.example.com", "tok").is_err());
+        assert!(RelayClient::new("http://10.0.0.5:8787", "tok").is_err());
+        assert!(RelayClient::new("ftp://sync.example.com", "tok").is_err());
+        assert!(RelayClient::new("https://sync.example.com", "tok").is_ok());
+        assert!(RelayClient::new("http://127.0.0.1:8787", "tok").is_ok());
+        assert!(RelayClient::new("http://localhost:8787/", "tok").is_ok());
+        assert!(RelayClient::new("http://[::1]:8787", "tok").is_ok());
+    }
+
+    #[test]
+    fn validate_url_normalizes_without_building_a_client() {
+        assert_eq!(RelayClient::validate_url(" https://relay.example.com/ ").unwrap(), "https://relay.example.com");
+        assert!(RelayClient::validate_url("http://relay.example.com").is_err());
     }
 }
 ```
@@ -1206,17 +1385,6 @@ Expected: 編譯錯誤(`RelayClient` 未定義)。
 ```rust
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Envelope {
-    pub id_hash: String,
-    pub kind: String,
-    pub seq: u64,
-    pub nonce: String,
-    pub ciphertext: String,
-    pub deleted: bool,
-}
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -1263,19 +1431,40 @@ pub struct RelayClient {
 }
 
 impl RelayClient {
-    pub fn new(base_url: &str, auth_token: &str) -> Result<Self, AppError> {
+    /// 只接受 `https://`;`http://` 僅限 loopback host(本機 `wrangler dev`)。回傳去掉尾斜線的正規化
+    /// URL。純驗證、不建 client:A3 的 `sync_set_relay_url` 在 tokio 執行緒上也能用。bearer token 有
+    /// 整條 chain 的讀寫刪權限,明文送出等於把 chain 交給網路上的任何人。
+    pub fn validate_url(base_url: &str) -> Result<String, AppError> {
         let trimmed = base_url.trim().trim_end_matches('/');
-        if !(trimmed.starts_with("http://") || trimmed.starts_with("https://")) {
-            return Err(AppError::Other("relay URL must start with http:// or https://".to_string()));
+        let url = reqwest::Url::parse(trimmed)
+            .map_err(|_| AppError::Other("relay URL must be a full URL such as https://relay.example.com".to_string()))?;
+        // `Url::host_str` 對 IPv6 回含中括號的 "[::1]"。
+        let loopback = matches!(url.host_str(), Some("127.0.0.1") | Some("localhost") | Some("[::1]"));
+        match url.scheme() {
+            "https" => {}
+            "http" if loopback => {}
+            "http" => {
+                return Err(AppError::Other(
+                    "relay URL must use https:// (plain http is only allowed for 127.0.0.1 / localhost)".to_string(),
+                ))
+            }
+            _ => return Err(AppError::Other("relay URL must start with https://".to_string())),
         }
+        Ok(trimmed.to_string())
+    }
+
+    pub fn new(base_url: &str, auth_token: &str) -> Result<Self, AppError> {
+        let base_url = Self::validate_url(base_url)?;
         let http = reqwest::blocking::Client::builder()
             .user_agent(concat!("sshelter/", env!("CARGO_PKG_VERSION")))
             .connect_timeout(CONNECT_TIMEOUT)
             .timeout(REQUEST_TIMEOUT)
+            // 不跟隨 redirect:避免 https → http 降級把 bearer token 送上明文連線。
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .map_err(|e| AppError::Other(format!("cannot build HTTP client: {e}")))?;
         Ok(Self {
-            base_url: trimmed.to_string(),
+            base_url,
             auth_token: auth_token.to_string(),
             http,
         })
@@ -1366,7 +1555,7 @@ impl RelayClient {
 - [ ] **Step 4: 執行測試確認通過**
 
 Run: `cd src-tauri && cargo test sync::relay 2>&1 | tail -5`
-Expected: `7 passed`(mockito 會綁隨機本機 port,不需網路)。
+Expected: `9 passed`(mockito 綁 `127.0.0.1` 的隨機 port —— 屬 loopback,所以 `http://` 可用;不需網路)。
 
 - [ ] **Step 5: 全套測試與 Commit**
 
@@ -1382,6 +1571,7 @@ git commit -m "feat(sync): relay HTTP client with conflict-aware push"
 
 ## Self-review(已執行)
 
-- **Spec 覆蓋**:§4 密碼學 → Task 1;§3.2 記錄與 §6 合併規則 → Task 2;§3.1/§3.3 受管檔與 Include → Task 3;§6 狀態檔、助記詞 keychain(§4)→ Task 4;§5 中繼 API → Task 5。背景執行緒、套用流程、UI、migration wizard 在 A3;Worker 在 A2。
-- **型別一致**:`Envelope`/`PushItem` 欄位名與 A2 Worker 的 wire 格式(camelCase)一致;`LocalRecord.seq` 對應 `PushItem.base_seq`;`record_key` 作為 `SyncState.records` 的 key。
-- **Review Focus 對應**:1 → Task 1 `normalize_accepts_messy_input_and_rejects_bad_words`;2 → Task 3 `blocks_of_…skips_the_rest` 與 `apply_replaces_one_block…`;3 → Task 5 `unreachable_relay_fails_fast`;4 → Task 5 `server_errors_and_garbage_bodies…`;5 → Task 4 `corrupt_or_newer_state…`。
+- **Spec 覆蓋**:§4 密碼學(含已知答案向量)→ Task 1;§3.2 記錄、§4 envelope 與 §6 合併規則 → Task 2;§3.1 受管檔、Include 置頂、wildcard 政策 → Task 3;§6 狀態檔(`records`/`sealed`/`remote_schema_version`)、助記詞 keychain(§4)→ Task 4;§5 中繼 API 與 §2 的 HTTPS/不跟隨 redirect → Task 5。背景執行緒、套用流程、UI、migration wizard 在 A3;Worker 在 A2。
+- **型別一致**:`Envelope` 定義在 Task 2(`record.rs`),Task 4 的 `sealed` 與 Task 5 的 client(`pub use`)共用;`PushItem` 欄位名與 A2 Worker 的 wire 格式(camelCase)一致;`LocalRecord.seq` 對應 `PushItem.base_seq`;`record_key` 作為 `SyncState.records` 的 key。
+- **Review Focus 對應**:1 → Task 1 `normalize_accepts_messy_input_and_rejects_bad_words`;2 → Task 3 `blocks_of_…skips_the_rest`、`apply_replaces_one_block…` 與 `wildcard_blocks_are_neither_extracted_nor_touched`;3 → Task 5 `unreachable_relay_fails_fast`;4 → Task 5 `server_errors_and_garbage_bodies…`;5 → Task 4 `corrupt_or_newer_state…`;6 → Task 5 `rejects_plain_http_except_loopback`;7 → Task 3 `ensure_include_goes_to_the_very_top_and_is_idempotent`。
+- **Codex review(2026-09-27)已納入**:HMAC trait 歧義(finding 15)、AAD/協定 byte-level 定義與向量(16)、wildcard 政策(17)、http relay URL(3)、祕密不進狀態檔(2,`sealed`)、Include 置頂(13)、`secrets::delete` 行為(24)、reqwest 版本與 lockfile 對齊。

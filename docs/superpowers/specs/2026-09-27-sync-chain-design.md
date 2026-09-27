@@ -26,10 +26,23 @@
   等同 Termius/1Password 的主密碼。配對畫面必須明講,並建議存進密碼管理器。
 - **中繼零知識**:只儲存密文與 metadata(chain id、序號、大小、時間、IP)。
   中繼被攻破 = 拿到密文,無助記詞無法解密。
+- **傳輸只走 HTTPS**:relay URL 必須是 `https://`;唯一例外是 loopback
+  (`127.0.0.1`、`localhost`、`[::1]`)供本機 `wrangler dev`。client **不跟隨 redirect**
+  (避免 https→http 降級把 bearer token 送上明文連線)。bearer token 有整條 chain 的讀寫刪權限,
+  所以這條規則不可放寬。
 - **私鑰 opt-in、逐把決定**:預設不同步任何既有金鑰;使用者在 Keys dialog
-  逐把勾「Sync this key」。硬體/不可匯出金鑰無法同步(UI 直接不提供選項)。
-- **裝置遺失的止血 = 輪替**(§8):產生新金鑰 → 批次部署 → 批次撤舊 → 更新 chain。
-  這是「一把鑰匙多台裝置」模型的必要配套,列為 v1 範圍。
+  逐把勾「Sync this key」;migration wizard 也一律**預設不勾**(被主機引用的只標示「建議」)。
+  硬體/不可匯出金鑰無法同步(UI 直接不提供選項)。
+- **本機狀態檔不含明文祕密**:`sync-state.json` 只保存本裝置會處理的種類
+  (Phase A:`host`/`device`/`meta`)的明文快取;`key`/`password` 與任何未知種類一律以
+  **原始密文 envelope** 保留在 `sealed`(供 Phase B 或更新版本處理),絕不解密進狀態檔。
+  0600 不等於 keychain:祕密只能落在 keychain 或 `~/.ssh/<name>`(0600)。
+- **Forget device 不是撤權**:同一條 chain 的每台裝置持有同一組助記詞,中繼無法分辨裝置,
+  所以「Forget device」只是把它從清單移除(tombstone 它的 device 記錄),**不會**阻止它繼續
+  同步。裝置遺失或不再信任的正確處置是 §8 的「重新建鏈 + 輪替」:在保留的裝置上建立新 chain
+  (新助記詞)→ 其餘裝置重新配對 → 之後才產生新 SSH 金鑰並批次部署/撤舊。新金鑰**只能進新
+  chain**:舊 chain 的所有密文對持有舊助記詞的人永遠可讀。UI 文案不得暗示 Forget 會停止
+  該裝置同步。
 - **密碼 opt-in、預設關**:「Sync passwords」是**每台裝置各自**的開關 —— 開啟的
   裝置才上傳自己的密碼、也才把遠端密碼記錄寫入本機 keychain;關閉的裝置兩者皆不做。
 - 既有 MCP 邊界不變:MCP allowlist 是每台裝置的本機政策,**不同步**。
@@ -39,10 +52,14 @@
 
 ### 3.1 受管同步檔(主機的真相來源)
 - 路徑固定:`~/.ssh/sshelter/hosts.config`(目錄 `~/.ssh/sshelter/` 0700)。
-- 加入 chain 或建立 chain 時,SSHelter 用既有的 Include 機制(`config/newfile.rs`
-  的 `include_insert_index`)在每台裝置的主 config 插入
-  `Include ~/.ssh/sshelter/hosts.config`(位置規則已測試:top-level、第一個
-  Host/Match 之前)。
+- 加入 chain 或建立 chain 時,SSHelter 在每台裝置的主 config 插入
+  `Include ~/.ssh/sshelter/hosts.config`,位置是**檔案最頂端**:前導註解/空行之後、任何
+  既有 Include、全域指令、Host/Match 之前(`sync::hosts_file::ensure_include`,自有的位置
+  規則)。刻意不用 `newfile.rs` 的 `include_insert_index`(它插在最後一個 Include **之後**):
+  ssh 是 first-obtained-wins,同步檔必須是第一個被讀到的定義,§10 的「同步主機遮蔽本地同名
+  主機」才成立。
+- 受管檔只放具名主機:`Host *`、`Host *.example`、`Host !x` 等含 wildcard 字元(`*`、`?`、`!`)
+  的區塊視為裝置本地的 config 結構 —— 不擷取、不上傳、收到遠端記錄時不套用、也不刪除。
 - **同步範圍 = 這個檔案裡的 host 區塊**。其他檔案的 host 維持裝置本地。
   提供「Move to synced」(沿用批次 move)與首次一鍵「把所有主機移入同步檔」。
 - sidebar 檔案分組把它顯示為「Synced」(預設 file alias)。
@@ -53,7 +70,7 @@
 | 欄位 | 說明 |
 |---|---|
 | `id` | 記錄識別(見各型別) |
-| `kind` | `host` / `key` / `password` / `device` |
+| `kind` | `host` / `key` / `password` / `device` / `meta`(chain 層級,見 §10) |
 | `version` | 本地遞增的邏輯版本(每次修改 +1) |
 | `updated_at_ms` | 修改時間(裝置時鐘) |
 | `device_id` | 最後修改的裝置 |
@@ -80,17 +97,29 @@
 - 加入 chain 時若本機已有**不同內容**的同名檔 → 中止該筆並提示改名,不覆蓋。
 - host 引用了未同步的金鑰 → sidebar/editor 顯示警示「key not synced」。
 
-## 4. 密碼學
+## 4. 密碼學(byte-level 定義;A1 以已知答案向量釘住)
 
-- 助記詞:BIP39 英文 24 詞(256-bit entropy),`bip39` crate。
-- 派生:`seed = bip39.to_seed("")`;`HKDF-SHA256(seed, info)`:
-  - `info="sshelter/v1/chain-id"` → 32 bytes → hex,作為 chain id(可公開)
-  - `info="sshelter/v1/auth"` → 32 bytes → bearer token(中繼只存 SHA-256(token))
-  - `info="sshelter/v1/enc"` → 32 bytes → 記錄加密金鑰
-- 記錄加密:XChaCha20-Poly1305(`chacha20poly1305` crate),每筆隨機 24-byte nonce;
-  AAD = `chain_id || kind || id`(防止記錄被搬到別的 chain 或改型別)。
-- 中繼看到的 envelope:`{ id_hash, kind, seq, ciphertext(base64), nonce, deleted }`,
-  其中 `id_hash = HMAC(enc_key, kind||id)` —— 中繼連 alias/檔名都看不到。
+- 助記詞:BIP39 英文 24 詞(256-bit entropy),`bip39` crate。輸入正規化:以任意空白切字 →
+  全部小寫 → 單一空白連接;字數 ≠ 24 或 BIP39 checksum 不符 → 拒絕。
+- `seed = PBKDF2-HMAC-SHA512(password = 正規化助記詞, salt = "mnemonic" || passphrase(""),
+  2048 rounds, 64 bytes)`,即 `bip39::Mnemonic::to_seed("")`。
+- HKDF-SHA256:`PRK = HKDF-Extract(salt = ASCII "sshelter-sync-v1", IKM = seed)`;各展開 32 bytes:
+  - `info = ASCII "sshelter/v1/chain-id"` → `chain_id`(小寫 hex,64 字元,可公開)
+  - `info = ASCII "sshelter/v1/auth"` → `auth_token`(小寫 hex,64 字元;中繼只存
+    `SHA-256(auth_token 的 ASCII hex 字串)` 的小寫 hex)
+  - `info = ASCII "sshelter/v1/enc"` → `enc_key`(32 raw bytes,只在記憶體)
+- `id_hash = hex(HMAC-SHA256(key = enc_key, msg = kind || 0x0A || id))`(小寫 hex,64 字元)
+  —— 中繼連 alias/檔名都看不到。
+- 記錄加密:XChaCha20-Poly1305(`chacha20poly1305` crate),key = `enc_key`,每筆隨機 24-byte
+  nonce;`AAD = chain_id || 0x0A || kind || 0x0A || id_hash`(全 ASCII)。AAD 綁 `id_hash`
+  而非明文 `id`:接收端解密前只有 `id_hash`。解密後必須再驗證「明文 `kind`/`id` 算出的
+  `id_hash`」與 envelope 相同,否則視為損毀。
+- 明文 = 整筆記錄的 JSON(`kind, id, version, updated_at_ms, device_id, deleted, payload`)。
+  tombstone 也帶明文 `id` 與時間戳(LWW 需要),所以 tombstone 一樣有密文(`payload: null`)。
+- 中繼看到的 envelope:`{ idHash, kind, seq, nonce(base64), ciphertext(base64), deleted }`;
+  base64 用標準字母表、含 padding。
+- 已知答案向量(釘在 `crypto.rs` 測試裡,防止協定被無意改動):助記詞
+  `abandon ×23 art` 的 `chain_id`、`auth_token`、`id_hash("host", "web-1")` 三個 hex 值。
 - 助記詞存本機 keychain(`secrets` 模組,account `sync:mnemonic`),因為任一台既有
   裝置都要能「Show pairing code」給新裝置(與 Brave 的 View sync code 一致);
   派生值只在記憶體,啟動時重算。**不存純文字檔**。
@@ -106,62 +135,107 @@ API(全部 `Authorization: Bearer <token>`,JSON):
 
 | Method | Path | 說明 |
 |---|---|---|
-| `PUT` | `/v1/chains/{chain_id}` | 建立 chain(冪等);首次寫入記下 token hash |
-| `POST` | `/v1/chains/{chain_id}/records` | 批次 upsert;body `[{id_hash, kind, ciphertext, nonce, deleted, base_seq?}]`;回每筆新 `seq`。**若 `base_seq` 落後於伺服器現況 → 該筆回 409 並附最新 envelope**(client 端合併後重送) |
-| `GET` | `/v1/chains/{chain_id}/records?since={seq}` | 回 `seq > since` 的 envelope 與 `latest_seq` |
-| `DELETE` | `/v1/chains/{chain_id}` | 刪除整個 chain(離開最後一台裝置時) |
+| `PUT` | `/v1/chains/{chain_id}` | 建立 chain(冪等):不存在 → `201` 並記下 token hash;存在且 token 相符 → `200`;不符 → `404`。**只有 Create 走這條**;Join 必須先 `GET …/records?since=0` 驗證(`404` = 這組助記詞沒有對應的 chain),Join 路徑絕不呼叫 PUT —— 否則任何 checksum 正確的助記詞都會建出一條新 chain 而不是回報錯誤 |
+| `POST` | `/v1/chains/{chain_id}/records` | 批次 upsert;body `[{idHash, kind, ciphertext, nonce, deleted, baseSeq}]`(1–200 筆);回每筆 `{status:"ok", seq}` 或 **`{status:"conflict", current: Envelope}`**(`baseSeq` 落後於伺服器現況;client 下一輪 pull 會拿到它)。伺服器先判定每筆接受/衝突,再以「接受後的用量」檢查配額;超過 → 整批 `413`、不做部分寫入 |
+| `GET` | `/v1/chains/{chain_id}/records?since={seq}` | 回 `seq > since` 的 envelope 與 `latestSeq` |
+| `DELETE` | `/v1/chains/{chain_id}` | 刪除整個 chain(離開最後一台裝置時);同一個 DO instance 之後必須能再次 `PUT` 建立(schema 重建) |
 
-防濫用:每 chain 總量上限 1 MiB、每筆 64 KiB、每 IP 與每 chain 速率限制、
-閒置 180 天自動清除、token hash 不符一律 404(不洩露 chain 存在)。
+防濫用:
+- 每筆 `ciphertext` ≤ 64 KiB;每 chain 儲存總量 ≤ 1 MiB(**含 tombstone 與 nonce**)、
+  記錄數 ≤ 4096;request body ≤ 1 MiB(`Content-Length` 超過就 `413`,讀完再驗一次長度,
+  之後才 JSON 解析)。
+- 每 chain 每分鐘 ≤ 120 次請求(`429`)。
+- **跨 chain 的防線**:每個來源 IP(`CF-Connecting-IP`)每小時最多建立 20 條 chain
+  (`429`)—— 建鏈是唯一會配置新儲存空間的操作;既有 chain 的讀寫已由每 chain 限制與配額
+  bound 住。
+- 閒置 180 天自動清除;token hash 不符一律 `404`(不洩露 chain 存在)。
 
 ## 6. 同步引擎(Rust,`src-tauri/src/sync/`)
 
 - 狀態:`~/.local/share/org.homelab.sshelter/sync-state.json`(`atomic_write` 0600):
-  `{ chain_id, device_id, relay_url, cursor_seq, password_sync: bool, records: {…本地快取…} }`。
-- 觸發:app 啟動、視窗取得焦點、每 45 秒(有焦點時)、本地變更後立即 push。
-- 流程:`pull(since=cursor)` → 套用遠端變更 → `push(dirty records)` → 409 者
-  合併後重送。
-- **合併規則(記錄層級 LWW)**:遠端 vs 本地同 id:`updated_at_ms` 大者勝,
-  相同則 `device_id` 字典序小者勝;輸的一方若是本地未上傳的修改 → 發事件
-  `sync://conflict` 讓前端 toast「web-1 was changed on MacBook, your local edit
-  was replaced」。tombstone 勝過同時間的修改。
-- **套用到本機**(每種型別一個 applier):
-  - host → 重寫 `hosts.config` 中該區塊(以 CST 替換整個 block 文字;不動其他區塊、
-    註解、順序;新區塊附加於檔尾;tombstone 移除區塊),經既有 `persist_file`
-    (備份 + 衝突指紋)。
-  - key → 寫 `~/.ssh/<name>`(0600)與 `.pub`;同名不同內容 → 跳過並記錄 issue。
-  - password → keychain set/delete。
-  - device → 只更新快取。
+  `{ version, chain_id, device_id, device_name, relay_url, cursor_seq, password_sync,
+  remote_schema_version, records: {明文快取,只有 host/device/meta}, sealed: {未處理種類的
+  原始 envelope}, last_sync_ms, last_error }`。
+- 觸發:app 啟動、視窗取得焦點、每 45 秒、本地變更後立即。
+- **一輪的順序**(每步可獨立失敗;失敗不影響前一步已持久化的結果):
+  1. 讀取受管檔目前的區塊(磁碟指紋與 in-memory 不同就先重載),記下本輪的**檔案指紋**。
+  2. 本機 diff → 產生 dirty 記錄(升版本、單調時間戳)並**立刻持久化**。離線時也一樣,
+     所以離線編輯的時間戳是編輯當下、不是重新連線的時間;重試沿用同一版本與時間戳。
+  3. `pull(since = cursor_seq)`:逐筆解密、驗證身分、LWW 合併;結果先留在記憶體(含
+     `cursor_seq = latestSeq`)。
+  4. **套用到本機**:短暫鎖 doc,先比對第 1 步的指紋 —— 受管檔若在這段網路時間內被改過
+     (UI 存檔或外部編輯),**整輪的 pull/merge 結果丟棄、cursor 不前進**,立刻再跑一輪
+     (下一輪的 diff 會把新的本機編輯變成更新的 dirty 記錄,LWW 自然正確);指紋相同才把
+     host 效果寫進 `hosts.config`(經既有 `persist_file`),並把合併後的記錄與 cursor 持久化。
+     沒有 host 效果時免比指紋(只有 device/meta 變動,與檔案無關)。
+  5. `push(dirty)`(分批:每批 ≤ 200 筆且 ≤ 512 KiB;唯讀模式略過)。**accepted 的 seq 只更新
+     該筆 `LocalRecord.seq` 並清 dirty,絕不推進 `cursor_seq`**(否則會跳過其他裝置在中間寫入
+     的序號);`conflict` 的記錄本輪不處理,只標記「立刻再跑一輪」,下一輪 pull 會拿到它。
+  6. 發事件:`sync://status`;有 host 效果寫進檔案 → `sync://applied`(前端據此重新載入主機
+     清單,後端重建 tray);本機未上傳修改被較新遠端蓋掉 → `sync://conflict`。
+- **合併規則(記錄層級 LWW)**:遠端 vs 本地同 id:`updated_at_ms` 大者勝;相同則 tombstone
+  勝過修改;再相同則 `device_id` 字典序小者勝。輸的一方若是本地未上傳的修改 → `sync://conflict`
+  toast「web-1 was changed on MacBook, your local edit was replaced」。
+- **遠端 host 記錄的三種結果**:`Upsert{alias, text}`(可解析、alias 相符、非 wildcard)/
+  `Delete{alias}`(**只有**驗證過的 `deleted = true`)/ `Skip`(解不開、身分不符、payload 格式
+  不支援、wildcard alias)。格式不支援**絕不**當成刪除。
+- **未處理的種類**(Phase A 的 `key`/`password`,以及任何未知 kind):原始 envelope 存進
+  `sealed`(key = `kind:idHash`),不解密、不落明文;cursor 照常前進。升級後的版本從 `sealed`
+  重新處理。
+- **唯讀模式**:chain 的 `meta.schema_version` 持久化為 `remote_schema_version`;**每輪開始**
+  用它判斷(不是只看本輪有沒有收到 meta)。比本 app 新 → 只套用可理解的記錄、不上傳、狀態列
+  顯示「請更新 SSHelter」。
+- **生命週期與同步的互斥**:runtime 有 `generation` 計數,Create/Join/Leave/改 relay URL 都 +1。
+  同步輪次開始時記下 generation,每次要回寫狀態或寫檔前重新比對,不同就整輪丟棄——避免在途
+  的舊輪次用舊 keys 寫檔、或把已離開的 chain 狀態整份放回去。
 - **從本機產生記錄**:兩個時機做「區塊 diff」——(a)SSHelter 自己對 `hosts.config`
-  的每次 `persist_file` 之後;(b)同步 tick 時檔案指紋與上次不同(使用者手改)。
-  diff = 逐區塊序列化後與快取比對,變了就升版本、標 dirty,消失的區塊 tombstone。
+  的每次 `persist_file` 之後(喚醒同步執行緒);(b)同步 tick 時檔案指紋與上次不同(使用者
+  手改)。diff = 逐區塊序列化後與快取比對,變了就升版本、標 dirty,消失的區塊 tombstone。
   Keys dialog 勾選/取消 → key 記錄;密碼儲存/刪除(既有 `secrets_set/delete`
-  命令)→ 本機「Sync passwords」開啟時產生記錄。
+  命令)→ 本機「Sync passwords」開啟時產生記錄(Phase B)。
 - 裝置身分:首次執行產生 `device_id`(16 bytes 隨機 hex),名稱預設主機名、可改。
-- Leave chain:清掉 keychain 的 sync 項目與 `sync-state.json`;本機檔案全部保留。
-  若是 chain 的最後一台裝置,詢問是否一併 `DELETE` 中繼上的 chain。
-- 離線:pull 失敗只記狀態,不阻擋任何本機操作;dirty 記錄下次上線再送。
+- Create:`PUT` 建鏈 → 存助記詞 → 種下 meta 與 device 記錄。Join:先 `GET …?since=0`
+  驗證(`404` → 「no sync chain matches this recovery phrase」,不建鏈)→ 存助記詞 → 種下
+  device 記錄。兩者都在 `spawn_blocking` 裡做網路。
+- Leave chain:先清 `sync-state.json` 的 chain 部分並持久化(確保停止同步)→ 再刪 keychain 的
+  助記詞。keychain 刪除失敗要**回報錯誤**且狀態列顯示「recovery phrase still in keychain」
+  與「Remove phrase」重試按鈕(再呼叫一次 `sync_leave_chain(false)`;未加入時它只重試 keychain
+  清理),不得宣稱已清乾淨。本機檔案全部保留。若是 chain 的最後
+  一台裝置,詢問是否一併 `DELETE` 中繼上的 chain。
+- 網路 I/O 只在同步執行緒(std thread)或 `tauri::async_runtime::spawn_blocking` 裡跑
+  (`reqwest::blocking` 在 tokio runtime 內會 panic);持有 doc 鎖時絕不做網路 I/O。
+- 離線:pull 失敗只記狀態,不阻擋任何本機操作;已持久化的 dirty 記錄下次上線再送。
 
 ## 7. 前端
 
 - **Settings → Sync** pane(比照 McpPane 的輪詢/狀態模式):
-  - 未加入:「Create sync chain」「Join with words」。
-  - 建立後:顯示 24 詞 + 「I have saved these words」確認(並提醒存進密碼管理器)。
-  - 已加入:狀態列(last sync、錯誤)、裝置清單(名稱/平台/last seen/持有金鑰/
-    Remove)、「Show pairing code」(明確按鈕、再次顯示 24 詞給新裝置抄)、
+  - 未加入:「Create sync chain」「Join with words」,以及 relay URL(進階)——自架或預設
+    中繼不可達時,**加入前**就要能改。
+  - 建立後:顯示 24 詞 + 「I have saved these words」確認(並提醒存進密碼管理器)。這個確認
+    畫面的 state 必須放在**不會因 `joined` 切換而卸載**的父層(pane 本身),否則建立成功的
+    瞬間畫面就消失,無法保證使用者看過並確認。
+  - 已加入:狀態列(last sync、錯誤)、裝置清單(名稱/平台/last seen/持有金鑰/**Forget**)、
+    「Show pairing code」(明確按鈕、再次顯示 24 詞給新裝置抄)、
     「Sync passwords」開關(本機)、relay URL(進階)、「Leave chain」。
+  - 助記詞(建立回傳、Show、Join 輸入)**不經 TanStack Query 的 mutation/query cache**:
+    直接 `tauriInvoke` + 元件 local state,關閉視窗即清掉。
 - **Keys dialog**:每把金鑰一個「Synced」開關(硬體/無私鑰檔者停用)。
 - **Sidebar**:`hosts.config` 群組標籤「Synced」;host 使用未同步金鑰時列尾小警示。
+- **遠端變更進 UI**:後端套用遠端 host 效果後發 `sync://applied`;前端據此讓 hosts/host
+  detail/files 的 query cache 失效(光靠 status 事件不會刷新主機清單),後端同時重建 tray。
 - **新裝置上手**:Join 完成 → 進度畫面(拉取記錄 → 寫入金鑰 → 寫入 config → 插入
   Include)→ 完成頁列出「N hosts, M keys, P passwords ready」。
-- **裝置移除**:Remove → tombstone → 若該裝置持有同步金鑰 → 提示「Rotate keys
-  it had access to」直達 §8。
+- **Forget device**:只從清單移除(tombstone),文案明講「it keeps syncing if it still has the
+  recovery phrase」;若該裝置遺失/不再信任 → 連結到 §8 的「Start a new chain」流程。
 
 ## 8. 金鑰輪替(v1 必要配套)
 
-- 入口:裝置移除提示、Keys dialog 每把同步金鑰的「Rotate…」。
+- 入口:Forget device 的「lost this device?」提示、Keys dialog 每把同步金鑰的「Rotate…」。
+- **前置(裝置遺失/不再信任時必做)**:舊 chain 的密文對持有舊助記詞的人永遠可讀,所以先
+  在保留的裝置上 Leave 舊 chain → 「Start a new chain」(新助記詞)→ 其餘保留裝置重新配對,
+  之後的新金鑰才只進新 chain。單純換金鑰不換 chain,遺失的裝置照樣拿得到新金鑰。
 - 流程(單一對話框、可看進度):
-  1. 產生新金鑰(名稱 `<old>-<yyyymmdd>` 或使用者指定)並加入 chain。
+  1. 產生新金鑰(名稱 `<old>-<yyyymmdd>` 或使用者指定)並加入(新)chain。
   2. 找出所有 `IdentityFile` 指向舊金鑰的同步主機 → 批次部署新公鑰
      (沿用 `deploy.rs` 管線;逐台結果列表;失敗可重試)。
   3. 成功的主機 → 遠端移除舊公鑰:新的 `REMOTE_REMOVE_SCRIPT`(`grep -vxF`
@@ -172,12 +246,16 @@ API(全部 `Authorization: Bearer <token>`,JSON):
 
 ## 9. 驗收與測試
 
-- Rust 單元:HKDF 派生向量固定測試、加解密 round-trip 與 AAD 錯配失敗、
+- Rust 單元:HKDF 派生已知答案向量、加解密 round-trip 與 AAD 錯配失敗、
   LWW 合併全案例(時間/裝置 tie-break/tombstone)、host 區塊序列化 round-trip
-  (含 `#tags:`)、applier 不動其他區塊、key 落地權限與同名不同內容跳過。
-- Relay:`wrangler dev` 下的整合測試(建立、push/pull、409 衝突、配額、錯 token 404)。
-- 端到端手動:兩個 SSHelter profile(以自訂 config path 模擬兩台)配對、
-  互改主機、同步私鑰後以 `ssh` 登入、移除裝置 → 輪替。
+  (含 `#tags:`)、applier 不動其他區塊、wildcard 區塊不擷取/不套用/不刪除、
+  cursor 只隨 pull 前進、格式不支援的記錄不刪主機、key 落地權限與同名不同內容跳過。
+- Relay:Workers Vitest 整合測試(建立、push/pull、conflict、配額含 tombstone、錯 token 404、
+  delete 後同 instance 可重建、每 IP 建鏈限制)。
+- 端到端手動:**兩個 OS 使用者帳號、VM 或實體機**。自訂 config path 不能模擬兩台裝置:
+  `~/.ssh/sshelter/`、`sync-state.json`、device id 與 keychain 都跟著 OS 使用者走,兩個
+  checkout 會互相操作同一份同步資產。步驟:配對、互改主機、同步私鑰後以 `ssh` 登入、
+  Forget device、重新建鏈 → 輪替。
 - 既有測試不退:Rust、vitest、四平台 CI。
 
 ## 10. 既有版本的 migration 與相容性
@@ -192,23 +270,28 @@ API(全部 `Authorization: Bearer <token>`,JSON):
    `Host *` 等 wildcard 區塊是 config 結構、裝置本地,**不搬**。提供選項「以原檔名
    加上 tag」(例如 `homelab.config` → tag `homelab`),讓依 tag 分組能延續原本的
    檔案分組。搬移後空掉的 Include 檔保留不刪。
-2. **金鑰**:列出 `~/.ssh` 現有金鑰供勾選是否同步;預設勾選「被已搬入主機的
-   `IdentityFile` 引用」的那些;硬體/無私鑰檔者不可勾。
+2. **金鑰**:列出 `~/.ssh` 現有金鑰供勾選是否同步;**全部預設不勾**(§2 的逐把 opt-in);
+   「被已搬入主機的 `IdentityFile` 引用」的那些只標示「recommended」;硬體/無私鑰檔者不可勾。
 3. **密碼**:若本機開啟「Sync passwords」,把已搬入主機在 keychain 的密碼建成記錄。
 
 **後續裝置加入時的既有資料處理**
-- 該裝置本地已有主機:Include 插在主檔頂部 → 依 ssh 的 first-match 語意,**同步檔
-  的同名主機會遮蔽本地定義**。加入 wizard 用既有 lint 的「shadowed alias」偵測
-  列出重複,逐筆選擇:保留本地(把本地區塊改名 `<alias>-local`)/ 改用同步版
-  (移除本地區塊,先備份)/ 稍後處理(維持遮蔽並在 sidebar 標示)。
+- 該裝置本地已有主機:Include 插在主檔**最頂端**(§3.1)→ 依 ssh 的 first-obtained-wins
+  語意,**同步檔的同名主機會遮蔽本地定義**。加入 wizard 列出重複(alias + 本地檔案),
+  逐筆選擇:保留本地(把本地區塊改名 `<alias>-local`)/ 改用同步版(移除本地區塊,先備份)
+  / 稍後處理(維持遮蔽並在 sidebar 標示)。這兩個動作走專用命令
+  `sync_resolve_shadowed(alias, file, action)`,**以檔案路徑明確定位**要改的那個區塊;
+  既有的 `config_rename_host`/`config_remove_host` 以「第一個命中」定位,會依 Include 順序
+  誤中同步檔那份,不可用於此。
 - 本地已有同名但不同內容的金鑰檔:不覆蓋,提示改名後重試(§3.3)。
 - 本地 keychain 已有同 alias 密碼且「Sync passwords」開啟:以記錄 LWW 決定,
   並在完成頁列出被覆蓋的項目。
 
 **資料格式版本化**
 - 每筆記錄 payload 含 `schema: 1`;chain 有一筆 `meta` 記錄(`schema_version`、
-  `created_by_app_version`)。client 支援版本 < chain `schema_version` → 唯讀模式
-  (仍套用可理解的記錄、不上傳、顯示「請更新 SSHelter」)。未知 `kind` 一律忽略保留。
+  `created_by_app_version`)。client 把收到的 `schema_version` 持久化為
+  `remote_schema_version`,每輪據此判斷:本 app 支援版本 < 它 → 唯讀模式
+  (仍套用可理解的記錄、不上傳、顯示「請更新 SSHelter」)。未知 `kind` 與本版不處理的
+  種類一律以原始密文保留在 `sealed`(§6),不解密、不丟棄。
 - `sync-state.json` 含 `version`,讀取時逐版遷移;無法解析 → 視為未加入並提示。
 - 前端 settings envelope 不新增欄位(sync 狀態全在 Rust 端),既有匯出/匯入不受影響;
   `hosts.config` 建立時若 `fileAliases` 無設定則預設顯示名「Synced」。

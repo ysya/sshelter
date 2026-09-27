@@ -2,28 +2,33 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** 讓使用者從 Settings → Sync 建立/加入 chain、看到裝置與同步狀態、把既有主機遷入同步檔、處理被遮蔽的同名主機;並把後端事件接進 UI。
+**Goal:** 讓使用者從 Settings → Sync 建立/加入 chain(加入前就能改 relay URL)、確認並保存助記詞、看到裝置與同步狀態、把既有主機遷入同步檔、以檔案定位處理被遮蔽的同名主機;並把後端事件(狀態、衝突、已套用)接進 UI。
 
-**Architecture:** 沿用 `src/lib/mcp.ts` + `McpPane` 的模式:TanStack Query 包 Tauri commands、Settings 分頁輪詢狀態;新增 `SyncPane.tsx`(獨立檔案,避免 `SettingsDialog.tsx` 再長)與 `SyncMigrationDialog.tsx`;`App.tsx` 監聽 `sync://status`/`sync://conflict` 事件與視窗焦點。純邏輯(遷入分組、助記詞輸入整理)抽成 `src/lib/sync-migration.ts` 以 vitest 覆蓋。
+**Architecture:** 沿用 `src/lib/mcp.ts` + `McpPane` 的模式:TanStack Query 包「非祕密」的 Tauri commands、Settings 分頁輪詢狀態;**助記詞相關呼叫(建立回傳、Show、Join 輸入)不經 TanStack Query 的 cache**(`useMutation` 會把 `variables`/`data` 留在 cache 裡),改為直接 `tauriInvoke` + 元件 local state。助記詞確認畫面的 state 放在 `SyncPane`(父層),不隨 `joined` 切換卸載。新增 `SyncPane.tsx`、`SyncMigrationDialog.tsx`;`App.tsx` 監聽 `sync://status`/`sync://conflict`/`sync://applied` 與視窗焦點。純邏輯抽成 `src/lib/sync-migration.ts` 以 vitest 覆蓋。
 
-**Tech Stack:** React + TypeScript、TanStack Query、Zustand、shadcn/ui 既有元件(Dialog、AlertDialog、Checkbox、Textarea、Switch、Badge、Button、Input)、`@tauri-apps/api/event`。
+**Tech Stack:** React + TypeScript、TanStack Query、Zustand、shadcn/ui 既有元件(Dialog、AlertDialog、Checkbox、Textarea、Badge、Button、Input)、`@tauri-apps/api/event`。
 
-**Spec:** `docs/superpowers/specs/2026-09-27-sync-chain-design.md` §7(前端)、§10(migration)
+**Spec:** `docs/superpowers/specs/2026-09-27-sync-chain-design.md` §7(前端)、§10(migration、shadowed alias)、§2(Forget device 不是撤權)
 
 ## Global Constraints
 
 - UI 文案英文;既有元件與樣式慣例(`Section`/`SettingsGroup`/`SettingsRow`);不新增 npm 相依。
-- 助記詞只在使用者明確按下按鈕時顯示,顯示區塊不可被 clipboard 以外的方式自動複製;不進 toast、不進 console。
+- 助記詞只在使用者明確按下按鈕時顯示,顯示區塊不可被 clipboard 以外的方式自動複製;不進 toast、不進 console、**不進 TanStack Query cache**(不用 `useMutation`/`useQuery` 承載 words)。
+- 助記詞確認對話框的 state 屬於 `SyncPane`,建立成功後 `joined` 變 true 時它必須仍然掛著,直到使用者勾「I have saved these words」。
+- Forget device 的文案不得暗示撤權(spec §2):明講「a device that still has the recovery phrase keeps syncing」。
+- `App.tsx` 已有 `const queryClient = useQueryClient();`(line ~59),**重用它**,不要再宣告一次;repo 開著 `noUnusedLocals`,不留未使用的 import。
 - `pnpm build`(tsc + vite)與 `pnpm test` 全綠;每 task 一個 commit。
-- 所有 Tauri 呼叫走 `tauriInvoke`;型別以 `src/bindings/*.ts` 為準(A3 生成)。
+- 所有 Tauri 呼叫走 `tauriInvoke`;型別以 `src/bindings/*.ts` 為準(A3 生成:`SyncStatus` 含 `phrase_cleanup_pending`、`DuplicateAlias`、`MigrationReport`)。
 
 ## Review Focus
 
 1. 使用者把 24 詞貼成多行、含逗號或編號(`1. abandon`)—— 前端先整理成單行空白分隔再送後端(Task 1 `cleanWordsInput` 測試)。
 2. 遷入清單必須排除 wildcard 區塊與已在同步檔的主機(Task 1 `groupHostsForMigration` 測試)。
-3. 建立 chain 後使用者關掉助記詞視窗前未確認 —— 必須有「I have saved these words」勾選才可關閉(Task 2)。
-4. 加入 chain 時 relay 404(助記詞錯)—— 顯示可讀錯誤、表單保留輸入(Task 2)。
+3. 建立 chain 後狀態立刻變 joined —— 助記詞對話框必須還在,且未勾選前不可關閉(Task 2:state 在 `SyncPane`;手動驗證)。
+4. 加入 chain 時 relay 404(助記詞錯)—— 顯示可讀錯誤、表單保留輸入(Task 2 手動驗證)。
 5. 離開 chain 時「Delete from relay」預設不勾、且說明會影響其他裝置(Task 2)。
+6. 預設中繼不可達或要用自架 —— 未加入畫面就能改 relay URL(Task 2)。
+7. 另一台裝置改了主機 —— 45 秒內本機 sidebar 更新、不需 reload(Task 1 `sync://applied` → invalidate `["config"]`;手動驗證)。
 
 ---
 
@@ -39,7 +44,9 @@
 **Interfaces:**
 - Consumes: `src/bindings/{SyncStatus,SyncDevice,MigrationReport,DuplicateAlias}.ts`、commands(A3)
 - Produces:
-  - `useSyncStatus(refetchInterval)`、`useCreateChain()`、`useJoinChain()`、`useLeaveChain()`、`useSyncNow()`、`useSetRelayUrl()`、`useSetDeviceName()`、`useRemoveDevice()`、`useShowWords()`、`useMigrateHosts()`、`useDuplicateAliases(enabled)`
+  - hooks(非祕密):`useSyncStatus(refetchInterval)`、`useLeaveChain()`、`useSyncNow()`、`useSetRelayUrl()`、`useSetDeviceName()`、`useForgetDevice()`、`useMigrateHosts()`、`useDuplicateAliases(enabled)`、`useResolveShadowed()`
+  - 祕密呼叫(不進 cache):`createChain(deviceName): Promise<string>`、`joinChain(words, deviceName): Promise<SyncStatus>`、`showWords(): Promise<string>`
+  - `refreshSyncViews(queryClient)`、`errorMessage(error)`
   - `cleanWordsInput(raw: string): string`
   - `groupHostsForMigration(hosts: HostSummary[], managedFile: string): { file: string; hosts: HostSummary[] }[]`
   - ui store:`syncMigrationOpen: boolean; setSyncMigrationOpen(open)`
@@ -142,7 +149,7 @@ Expected: 4 passed。
 建立 `src/lib/sync.ts`:
 
 ```ts
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient, type QueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 
 import type { DuplicateAlias } from "@/bindings/DuplicateAlias";
@@ -153,8 +160,15 @@ import { tauriInvoke } from "@/lib/ipc";
 export const syncStatusKey = ["sync", "status"] as const;
 export const syncDuplicatesKey = ["sync", "duplicates"] as const;
 
-function errorMessage(error: unknown): string {
+export function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+/** After anything that changes chain membership: refetch status, hosts and duplicates. */
+export function refreshSyncViews(queryClient: QueryClient): void {
+  void queryClient.invalidateQueries({ queryKey: syncStatusKey });
+  void queryClient.invalidateQueries({ queryKey: ["config"] });
+  void queryClient.invalidateQueries({ queryKey: syncDuplicatesKey });
 }
 
 export function useSyncStatus(refetchInterval: number | false = false) {
@@ -165,37 +179,17 @@ export function useSyncStatus(refetchInterval: number | false = false) {
   });
 }
 
+/** Non-secret mutations that return the new status: prime the cache, refresh config views. */
 function useStatusMutation<TVars>(cmd: string, failure: string, map: (v: TVars) => Record<string, unknown>) {
   const queryClient = useQueryClient();
   return useMutation<SyncStatus, unknown, TVars>({
     mutationFn: (vars) => tauriInvoke<SyncStatus>(cmd, map(vars)),
     onSuccess: (status) => {
       queryClient.setQueryData(syncStatusKey, status);
-      queryClient.invalidateQueries({ queryKey: ["config"] });
+      void queryClient.invalidateQueries({ queryKey: ["config"] });
     },
     onError: (error) => toast.error(failure, { description: errorMessage(error) }),
   });
-}
-
-/** Returns the 24 recovery words; the caller shows them exactly once. */
-export function useCreateChain() {
-  const queryClient = useQueryClient();
-  return useMutation<string, unknown, { deviceName: string }>({
-    mutationFn: ({ deviceName }) => tauriInvoke<string>("sync_create_chain", { deviceName }),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: syncStatusKey });
-      queryClient.invalidateQueries({ queryKey: ["config"] });
-    },
-    onError: (error) => toast.error("Could not create sync chain", { description: errorMessage(error) }),
-  });
-}
-
-export function useJoinChain() {
-  return useStatusMutation<{ words: string; deviceName: string }>(
-    "sync_join_chain",
-    "Could not join sync chain",
-    ({ words, deviceName }) => ({ words, deviceName }),
-  );
 }
 
 export function useLeaveChain() {
@@ -210,8 +204,9 @@ export function useSetDeviceName() {
   return useStatusMutation<{ name: string }>("sync_set_device_name", "Could not rename this device", ({ name }) => ({ name }));
 }
 
-export function useRemoveDevice() {
-  return useStatusMutation<{ deviceId: string }>("sync_remove_device", "Could not remove device", ({ deviceId }) => ({ deviceId }));
+/** Removes a device from the list only — it is NOT revocation (see the pane copy). */
+export function useForgetDevice() {
+  return useStatusMutation<{ deviceId: string }>("sync_forget_device", "Could not forget device", ({ deviceId }) => ({ deviceId }));
 }
 
 export function useSyncNow() {
@@ -221,23 +216,11 @@ export function useSyncNow() {
   });
 }
 
-/** Deliberately a mutation: the phrase is read only on an explicit click, never cached. */
-export function useShowWords() {
-  return useMutation<string, unknown, void>({
-    mutationFn: () => tauriInvoke<string>("sync_show_words"),
-    onError: (error) => toast.error("Could not read recovery phrase", { description: errorMessage(error) }),
-  });
-}
-
 export function useMigrateHosts() {
   const queryClient = useQueryClient();
   return useMutation<MigrationReport, unknown, { aliases: string[]; tagByFile: boolean }>({
     mutationFn: ({ aliases, tagByFile }) => tauriInvoke<MigrationReport>("sync_migrate_hosts", { aliases, tagByFile }),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["config"] });
-      queryClient.invalidateQueries({ queryKey: syncStatusKey });
-      queryClient.invalidateQueries({ queryKey: syncDuplicatesKey });
-    },
+    onSuccess: () => refreshSyncViews(queryClient),
     onError: (error) => toast.error("Could not move hosts", { description: errorMessage(error) }),
   });
 }
@@ -248,6 +231,38 @@ export function useDuplicateAliases(enabled: boolean) {
     queryFn: () => tauriInvoke<DuplicateAlias[]>("sync_duplicate_aliases"),
     enabled,
   });
+}
+
+/** Rename or remove the LOCAL copy of a shadowed alias, addressed by file path (never the synced copy). */
+export function useResolveShadowed() {
+  const queryClient = useQueryClient();
+  return useMutation<DuplicateAlias[], unknown, { alias: string; file: string; action: "rename" | "remove" }>({
+    mutationFn: ({ alias, file, action }) => tauriInvoke<DuplicateAlias[]>("sync_resolve_shadowed", { alias, file, action }),
+    onSuccess: (remaining) => {
+      queryClient.setQueryData(syncDuplicatesKey, remaining);
+      void queryClient.invalidateQueries({ queryKey: ["config"] });
+    },
+    onError: (error) => toast.error("Could not update the local host", { description: errorMessage(error) }),
+  });
+}
+
+/*
+ * Recovery-phrase calls deliberately bypass TanStack Query: `useMutation` keeps
+ * `variables` and `data` in its cache, so the words would linger in memory long
+ * after the dialog closed. Callers hold the result in component state only and
+ * drop it when the dialog closes.
+ */
+
+export function createChain(deviceName: string): Promise<string> {
+  return tauriInvoke<string>("sync_create_chain", { deviceName });
+}
+
+export function joinChain(words: string, deviceName: string): Promise<SyncStatus> {
+  return tauriInvoke<SyncStatus>("sync_join_chain", { words, deviceName });
+}
+
+export function showWords(): Promise<string> {
+  return tauriInvoke<string>("sync_show_words");
 }
 ```
 
@@ -263,21 +278,24 @@ export function useDuplicateAliases(enabled: boolean) {
 
 實作加 `syncMigrationOpen: false, setSyncMigrationOpen: (syncMigrationOpen) => set({ syncMigrationOpen }),`。
 
-`src/App.tsx`:在既有 `useEffect` 區加入(import `listen` from `@tauri-apps/api/event`、`useQueryClient`、`toast`、`syncStatusKey`、`tauriInvoke`):
+`src/App.tsx`:**重用既有的 `const queryClient = useQueryClient();`**(已在 `App()` 內宣告,不要再宣告一次),在既有 `useEffect` 區加入(新增 import:`listen` from `@tauri-apps/api/event`、`syncStatusKey` from `@/lib/sync`、`tauriInvoke` from `@/lib/ipc`、`import type { SyncStatus } from "@/bindings/SyncStatus"`;`toast` 與 `useQueryClient` 已 import):
 
 ```tsx
   // Sync engine → UI: status pushes refresh the Settings pane without polling;
-  // conflicts surface as a toast; regaining focus nudges a sync round.
-  const queryClient = useQueryClient();
+  // applied remote changes refresh the host list; conflicts surface as a toast;
+  // regaining focus nudges a sync round.
   useEffect(() => {
     const unlisten: Array<() => void> = [];
     void listen<SyncStatus>("sync://status", (e) => queryClient.setQueryData(syncStatusKey, e.payload)).then((u) => unlisten.push(u));
+    void listen<number>("sync://applied", () => {
+      void queryClient.invalidateQueries({ queryKey: ["config"] });
+    }).then((u) => unlisten.push(u));
     void listen<string[]>("sync://conflict", (e) => {
       const aliases = e.payload.join(", ");
       toast.warning("Sync overwrote a local change", {
         description: `${aliases} was edited on another device more recently.`,
       });
-      queryClient.invalidateQueries({ queryKey: ["config"] });
+      void queryClient.invalidateQueries({ queryKey: ["config"] });
     }).then((u) => unlisten.push(u));
     const onFocus = () => void tauriInvoke("sync_now");
     window.addEventListener("focus", onFocus);
@@ -288,12 +306,10 @@ export function useDuplicateAliases(enabled: boolean) {
   }, [queryClient]);
 ```
 
-(`import type { SyncStatus } from "@/bindings/SyncStatus";`)
-
 - [ ] **Step 6: 型別檢查、測試、Commit**
 
 Run: `pnpm build && pnpm test`
-Expected: 全綠。
+Expected: 全綠(特別注意 `noUnusedLocals`:沒有未使用的 import)。
 
 ```bash
 git add src/lib/sync.ts src/lib/sync-migration.ts src/lib/sync-migration.test.ts src/stores/ui.ts src/App.tsx
@@ -306,10 +322,10 @@ git commit -m "feat(sync): frontend hooks, event wiring and migration helpers"
 
 **Files:**
 - Create: `src/components/SyncPane.tsx`
-- Modify: `src/components/SettingsDialog.tsx`(CATEGORIES 加 `{ id: "sync", label: "Sync", icon: RefreshCw }`;`{category === "sync" && <SyncPane />}`;import)
+- Modify: `src/components/SettingsDialog.tsx`(CATEGORIES 加 `{ id: "sync", label: "Sync", icon: RefreshCw }`;`{category === "sync" && <SyncPane />}`;import;`function SettingsRow` 前加 `export`)
 
 **Interfaces:**
-- Consumes: Task 1 hooks、`Section`/`SettingsGroup`(`@/components/settings-primitives`)、`SettingsRow`(SettingsDialog 內部元件 —— 匯出它:在 `SettingsDialog.tsx` 的 `function SettingsRow` 前加 `export`)、`useSettingsStore().setFileAlias`、`useUiStore().setSyncMigrationOpen`
+- Consumes: Task 1 hooks 與祕密呼叫、`Section`/`SettingsGroup`(`@/components/settings-primitives`)、`SettingsRow`(SettingsDialog 匯出)、`useSettingsStore().setFileAlias`/`fileAliases`、`useUiStore().setSyncMigrationOpen`、`copyText`(`@/lib/clipboard`)
 - Produces: `<SyncPane />`
 
 - [ ] **Step 1: 實作**
@@ -318,18 +334,22 @@ git commit -m "feat(sync): frontend hooks, event wiring and migration helpers"
 
 ```tsx
 import { useState } from "react";
-import { Copy, Eye, Loader2, RefreshCw, Trash2 } from "lucide-react";
+import { useQueryClient } from "@tanstack/react-query";
+import { Copy, Eye, Loader2, RefreshCw, UserMinus } from "lucide-react";
 import { toast } from "sonner";
 
+import type { SyncStatus } from "@/bindings/SyncStatus";
 import { cleanWordsInput } from "@/lib/sync-migration";
 import {
-  useCreateChain,
-  useJoinChain,
+  createChain,
+  errorMessage,
+  joinChain,
+  refreshSyncViews,
+  showWords,
+  useForgetDevice,
   useLeaveChain,
-  useRemoveDevice,
   useSetDeviceName,
   useSetRelayUrl,
-  useShowWords,
   useSyncNow,
   useSyncStatus,
 } from "@/lib/sync";
@@ -342,7 +362,6 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import {
   AlertDialog,
@@ -356,57 +375,149 @@ import {
 } from "@/components/ui/alert-dialog";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 
+/**
+ * Settings → Sync. The recovery-phrase dialogs live HERE, above the joined /
+ * not-joined split: creating a chain flips `joined` immediately, and a dialog
+ * owned by NotJoinedPane would unmount before the user confirmed the words.
+ * The words only ever live in component state — never in a query cache.
+ */
 export function SyncPane() {
   const status = useSyncStatus(5_000);
+  const setMigrationOpen = useUiStore((s) => s.setSyncMigrationOpen);
+  const [freshWords, setFreshWords] = useState<string | null>(null); // just created; must be confirmed
+  const [shownWords, setShownWords] = useState<string | null>(null); // re-shown on request
+  const [saved, setSaved] = useState(false);
+
   if (status.isLoading || !status.data) {
     return <p className="px-3 py-3 text-sm text-muted-foreground">Loading sync status…</p>;
   }
-  return status.data.joined ? <JoinedPane /> : <NotJoinedPane defaultDeviceName={status.data.device_name} />;
-}
 
-/** Create or join. The 24 words are shown exactly once, behind an explicit confirmation. */
-function NotJoinedPane({ defaultDeviceName }: { defaultDeviceName: string }) {
-  const [deviceName, setDeviceName] = useState(defaultDeviceName);
-  const [words, setWords] = useState("");
-  const [shownWords, setShownWords] = useState<string | null>(null);
-  const [saved, setSaved] = useState(false);
-  const create = useCreateChain();
-  const join = useJoinChain();
-  const setFileAlias = useSettingsStore((s) => s.setFileAlias);
-  const fileAliases = useSettingsStore((s) => s.fileAliases);
-  const setMigrationOpen = useUiStore((s) => s.setSyncMigrationOpen);
-  const status = useSyncStatus();
-
-  const labelManagedFile = () => {
-    const file = status.data?.managed_file;
-    if (file && !fileAliases[file]) setFileAlias(file, "Synced");
+  const finishOnboarding = () => {
+    setFreshWords(null);
+    setSaved(false);
+    setMigrationOpen(true);
   };
-
-  const onCreate = () =>
-    create.mutate(
-      { deviceName },
-      {
-        onSuccess: (phrase) => {
-          setShownWords(phrase);
-          labelManagedFile();
-        },
-      },
-    );
-
-  const onJoin = () =>
-    join.mutate(
-      { words: cleanWordsInput(words), deviceName },
-      {
-        onSuccess: () => {
-          labelManagedFile();
-          toast.success("Joined the sync chain");
-          setMigrationOpen(true);
-        },
-      },
-    );
 
   return (
     <>
+      {status.data.joined ? (
+        <JoinedPane status={status.data} onShowWords={setShownWords} />
+      ) : (
+        <NotJoinedPane status={status.data} onCreated={setFreshWords} />
+      )}
+
+      <Dialog open={freshWords !== null} onOpenChange={(open) => { if (!open && saved) finishOnboarding(); }}>
+        <DialogContent className="sm:max-w-lg" onEscapeKeyDown={(e) => { if (!saved) e.preventDefault(); }} onPointerDownOutside={(e) => { if (!saved) e.preventDefault(); }}>
+          <DialogHeader>
+            <DialogTitle>Your recovery phrase</DialogTitle>
+            <DialogDescription>
+              Enter these 24 words on every other device. Anyone with them can read your synced hosts, so keep them in a password manager — SSHelter can show them again from a device that is already in the chain.
+            </DialogDescription>
+          </DialogHeader>
+          <WordGrid words={freshWords ?? ""} />
+          <label className="flex items-center gap-2 text-sm">
+            <Checkbox checked={saved} onCheckedChange={(v) => setSaved(v === true)} />
+            I have saved these words somewhere safe
+          </label>
+          <DialogFooter>
+            <Button type="button" disabled={!saved} onClick={finishOnboarding}>
+              Continue
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={shownWords !== null} onOpenChange={(open) => { if (!open) setShownWords(null); }}>
+        <DialogContent className="sm:max-w-lg">
+          <DialogHeader>
+            <DialogTitle>Recovery phrase</DialogTitle>
+            <DialogDescription>Enter these words on the new device under Settings → Sync → Join.</DialogDescription>
+          </DialogHeader>
+          <WordGrid words={shownWords ?? ""} />
+        </DialogContent>
+      </Dialog>
+    </>
+  );
+}
+
+/** Advanced row shared by both panes: the relay must be reachable BEFORE create/join. */
+function RelayUrlRow({ current }: { current: string }) {
+  const setRelayUrl = useSetRelayUrl();
+  const [draft, setDraft] = useState(current);
+  return (
+    <SettingsRow id="sync-relay" label="Relay URL" description="https:// only (plain http is allowed for localhost). Self-host from the repository's relay/ folder.">
+      <div className="flex items-center gap-1.5">
+        <Input id="sync-relay" value={draft} onChange={(e) => setDraft(e.target.value)} className="h-7 w-64 font-mono text-xs" />
+        <Button type="button" variant="secondary" size="sm" className="h-7" disabled={draft.trim() === current || setRelayUrl.isPending} onClick={() => setRelayUrl.mutate({ url: draft })}>
+          Save
+        </Button>
+      </div>
+    </SettingsRow>
+  );
+}
+
+/** Create or join. Errors keep the form as it was so the user can fix a typo. */
+function NotJoinedPane({ status, onCreated }: { status: SyncStatus; onCreated: (words: string) => void }) {
+  const queryClient = useQueryClient();
+  const [deviceName, setDeviceName] = useState(status.device_name);
+  const [words, setWords] = useState("");
+  const [busy, setBusy] = useState<"create" | "join" | null>(null);
+  const leave = useLeaveChain();
+  const setFileAlias = useSettingsStore((s) => s.setFileAlias);
+  const fileAliases = useSettingsStore((s) => s.fileAliases);
+  const setMigrationOpen = useUiStore((s) => s.setSyncMigrationOpen);
+
+  const labelManagedFile = () => {
+    if (status.managed_file && !fileAliases[status.managed_file]) setFileAlias(status.managed_file, "Synced");
+  };
+
+  const onCreate = async () => {
+    setBusy("create");
+    try {
+      const phrase = await createChain(deviceName);
+      labelManagedFile();
+      onCreated(phrase);
+      refreshSyncViews(queryClient);
+    } catch (error) {
+      toast.error("Could not create sync chain", { description: errorMessage(error) });
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const onJoin = async () => {
+    setBusy("join");
+    try {
+      await joinChain(cleanWordsInput(words), deviceName);
+      labelManagedFile();
+      setWords("");
+      toast.success("Joined the sync chain");
+      refreshSyncViews(queryClient);
+      setMigrationOpen(true);
+    } catch (error) {
+      // Keep the pasted words so a typo can be fixed.
+      toast.error("Could not join sync chain", { description: errorMessage(error) });
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const wordCount = cleanWordsInput(words) === "" ? 0 : cleanWordsInput(words).split(" ").length;
+
+  return (
+    <>
+      {status.phrase_cleanup_pending && (
+        <Section title="Cleanup needed" description="You left the chain, but the recovery phrase is still in the keychain.">
+          <SettingsGroup>
+            <SettingsRow label="Recovery phrase" description="Retry removing it from the OS keychain.">
+              <Button type="button" variant="outline" size="sm" className="h-7" disabled={leave.isPending} onClick={() => leave.mutate({ deleteRemote: false })}>
+                Remove phrase
+              </Button>
+            </SettingsRow>
+          </SettingsGroup>
+        </Section>
+      )}
+
       <Section
         title="Sync chain"
         description="Keep hosts in sync across your computers without an account. A 24-word recovery phrase is the only secret; the relay only ever stores encrypted records."
@@ -416,8 +527,8 @@ function NotJoinedPane({ defaultDeviceName }: { defaultDeviceName: string }) {
             <Input id="sync-device-name" value={deviceName} onChange={(e) => setDeviceName(e.target.value)} className="h-7 w-48 text-sm" />
           </SettingsRow>
           <SettingsRow label="Start a new chain" description="Creates the recovery phrase you will enter on other devices.">
-            <Button type="button" size="sm" className="h-7" disabled={create.isPending || deviceName.trim() === ""} onClick={onCreate}>
-              {create.isPending && <Loader2 className="size-3.5 animate-spin" />} Create
+            <Button type="button" size="sm" className="h-7" disabled={busy !== null || deviceName.trim() === ""} onClick={() => void onCreate()}>
+              {busy === "create" && <Loader2 className="size-3.5 animate-spin" />} Create
             </Button>
           </SettingsRow>
         </SettingsGroup>
@@ -432,33 +543,21 @@ function NotJoinedPane({ defaultDeviceName }: { defaultDeviceName: string }) {
             rows={3}
             className="font-mono text-sm"
             aria-label="Recovery phrase"
+            autoCorrect="off"
+            autoCapitalize="off"
+            spellCheck={false}
           />
-          <Button type="button" size="sm" className="h-7" disabled={join.isPending || cleanWordsInput(words).split(" ").length !== 24} onClick={onJoin}>
-            {join.isPending && <Loader2 className="size-3.5 animate-spin" />} Join
+          <Button type="button" size="sm" className="h-7" disabled={busy !== null || wordCount !== 24 || deviceName.trim() === ""} onClick={() => void onJoin()}>
+            {busy === "join" && <Loader2 className="size-3.5 animate-spin" />} Join
           </Button>
         </div>
       </Section>
 
-      <Dialog open={shownWords !== null} onOpenChange={(open) => { if (!open && saved) { setShownWords(null); setSaved(false); setMigrationOpen(true); } }}>
-        <DialogContent className="sm:max-w-lg" onEscapeKeyDown={(e) => { if (!saved) e.preventDefault(); }} onPointerDownOutside={(e) => { if (!saved) e.preventDefault(); }}>
-          <DialogHeader>
-            <DialogTitle>Your recovery phrase</DialogTitle>
-            <DialogDescription>
-              Enter these 24 words on every other device. Anyone with them can read your synced hosts, so keep them in a password manager — SSHelter can show them again from this device only.
-            </DialogDescription>
-          </DialogHeader>
-          <WordGrid words={shownWords ?? ""} />
-          <label className="flex items-center gap-2 text-sm">
-            <Checkbox checked={saved} onCheckedChange={(v) => setSaved(v === true)} />
-            I have saved these words somewhere safe
-          </label>
-          <DialogFooter>
-            <Button type="button" disabled={!saved} onClick={() => { setShownWords(null); setSaved(false); setMigrationOpen(true); }}>
-              Continue
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+      <Section title="Advanced" description="Change this before creating or joining if you self-host the relay or the default one is unreachable.">
+        <SettingsGroup>
+          <RelayUrlRow current={status.relay_url} />
+        </SettingsGroup>
+      </Section>
     </>
   );
 }
@@ -470,7 +569,7 @@ function WordGrid({ words }: { words: string }) {
       await copyText(words);
       toast.success("Recovery phrase copied — clear your clipboard when done");
     } catch (error) {
-      toast.error("Clipboard unavailable", { description: String(error) });
+      toast.error("Clipboard unavailable", { description: errorMessage(error) });
     }
   };
   return (
@@ -483,30 +582,36 @@ function WordGrid({ words }: { words: string }) {
           </li>
         ))}
       </ol>
-      <Button type="button" variant="outline" size="sm" className="h-7" onClick={copy}>
+      <Button type="button" variant="outline" size="sm" className="h-7" onClick={() => void copy()}>
         <Copy className="size-3.5" /> Copy
       </Button>
     </div>
   );
 }
 
-function JoinedPane() {
-  const status = useSyncStatus(5_000);
-  const s = status.data!;
+function JoinedPane({ status: s, onShowWords }: { status: SyncStatus; onShowWords: (words: string) => void }) {
   const syncNow = useSyncNow();
-  const showWords = useShowWords();
   const leave = useLeaveChain();
-  const removeDevice = useRemoveDevice();
+  const forget = useForgetDevice();
   const setDeviceName = useSetDeviceName();
-  const setRelayUrl = useSetRelayUrl();
-  const setMigrationOpen = useUiStore((s) => s.setSyncMigrationOpen);
-  const [words, setWords] = useState<string | null>(null);
+  const setMigrationOpen = useUiStore((st) => st.setSyncMigrationOpen);
+  const [revealing, setRevealing] = useState(false);
   const [leaveOpen, setLeaveOpen] = useState(false);
   const [deleteRemote, setDeleteRemote] = useState(false);
   const [nameDraft, setNameDraft] = useState(s.device_name);
-  const [relayDraft, setRelayDraft] = useState(s.relay_url);
 
   const lastSync = s.last_sync_ms ? new Date(s.last_sync_ms).toLocaleString() : "never";
+
+  const reveal = async () => {
+    setRevealing(true);
+    try {
+      onShowWords(await showWords());
+    } catch (error) {
+      toast.error("Could not read recovery phrase", { description: errorMessage(error) });
+    } finally {
+      setRevealing(false);
+    }
+  };
 
   return (
     <>
@@ -515,7 +620,7 @@ function JoinedPane() {
           <SettingsRow label="Status" description={s.last_error ?? (s.pending > 0 ? `${s.pending} change${s.pending === 1 ? "" : "s"} waiting to upload` : "Up to date")}>
             <div className="flex items-center gap-1.5">
               <Badge variant={s.last_error ? "destructive" : s.read_only ? "outline" : "secondary"}>
-                {s.last_error ? "Error" : s.read_only ? "Read-only" : "Synced"}
+                {s.read_only ? "Read-only" : s.last_error ? "Error" : "Synced"}
               </Badge>
               <Button type="button" variant="ghost" size="icon" className="size-7" aria-label="Sync now" disabled={syncNow.isPending} onClick={() => syncNow.mutate()}>
                 <RefreshCw className="size-3.5" />
@@ -536,20 +641,23 @@ function JoinedPane() {
             </Button>
           </SettingsRow>
           <SettingsRow label="Recovery phrase" description="Needed to add another device. Shown only on request.">
-            <Button type="button" variant="outline" size="sm" className="h-7" disabled={showWords.isPending} onClick={() => showWords.mutate(undefined, { onSuccess: setWords })}>
+            <Button type="button" variant="outline" size="sm" className="h-7" disabled={revealing} onClick={() => void reveal()}>
               <Eye className="size-3.5" /> Show
             </Button>
           </SettingsRow>
         </SettingsGroup>
       </Section>
 
-      <Section title="Devices" description="Every device that joined this chain. Removing one stops it from receiving updates until it rejoins.">
+      <Section
+        title="Devices"
+        description="Every device that joined this chain. Forget only removes a device from this list — a device that still has the recovery phrase keeps syncing. If a device was lost, leave this chain, start a new one on the devices you keep, and rotate the keys it could see."
+      >
         <SettingsGroup>
           {s.devices.map((d) => (
             <SettingsRow key={d.id} label={d.name + (d.is_this ? " (this device)" : "")} description={`${d.platform} · last seen ${new Date(d.last_seen_ms).toLocaleString()}`}>
               {!d.is_this && (
-                <Button type="button" variant="ghost" size="icon" className="size-7 text-muted-foreground" aria-label={`Remove ${d.name}`} disabled={removeDevice.isPending} onClick={() => removeDevice.mutate({ deviceId: d.id })}>
-                  <Trash2 className="size-3.5" />
+                <Button type="button" variant="ghost" size="sm" className="h-7 text-muted-foreground" aria-label={`Forget ${d.name}`} disabled={forget.isPending} onClick={() => forget.mutate({ deviceId: d.id })}>
+                  <UserMinus className="size-3.5" /> Forget
                 </Button>
               )}
             </SettingsRow>
@@ -557,16 +665,9 @@ function JoinedPane() {
         </SettingsGroup>
       </Section>
 
-      <Section title="Advanced" description="The relay only stores encrypted records; self-host it from the repository's relay/ folder if you prefer.">
+      <Section title="Advanced" description="The relay only stores encrypted records.">
         <SettingsGroup>
-          <SettingsRow id="sync-relay" label="Relay URL">
-            <div className="flex items-center gap-1.5">
-              <Input id="sync-relay" value={relayDraft} onChange={(e) => setRelayDraft(e.target.value)} className="h-7 w-64 font-mono text-xs" />
-              <Button type="button" variant="secondary" size="sm" className="h-7" disabled={relayDraft === s.relay_url || setRelayUrl.isPending} onClick={() => setRelayUrl.mutate({ url: relayDraft })}>
-                Save
-              </Button>
-            </div>
-          </SettingsRow>
+          <RelayUrlRow current={s.relay_url} />
           <SettingsRow label="Leave chain" description="This device keeps every file it has; it just stops syncing.">
             <Button type="button" variant="outline" size="sm" className="h-7 text-destructive hover:text-destructive" onClick={() => setLeaveOpen(true)}>
               Leave…
@@ -574,16 +675,6 @@ function JoinedPane() {
           </SettingsRow>
         </SettingsGroup>
       </Section>
-
-      <Dialog open={words !== null} onOpenChange={(open) => { if (!open) setWords(null); }}>
-        <DialogContent className="sm:max-w-lg">
-          <DialogHeader>
-            <DialogTitle>Recovery phrase</DialogTitle>
-            <DialogDescription>Enter these words on the new device under Settings → Sync → Join.</DialogDescription>
-          </DialogHeader>
-          <WordGrid words={words ?? ""} />
-        </DialogContent>
-      </Dialog>
 
       <AlertDialog open={leaveOpen} onOpenChange={setLeaveOpen}>
         <AlertDialogContent>
@@ -612,12 +703,14 @@ function JoinedPane() {
 
 `SettingsDialog.tsx`:`import { RefreshCw } from "lucide-react"`(併入既有 lucide import)、`import { SyncPane } from "@/components/SyncPane"`;CATEGORIES 在 `ai` 之後加 `{ id: "sync", label: "Sync", icon: RefreshCw }`;分頁渲染加 `{category === "sync" && <SyncPane />}`;`function SettingsRow` 改為 `export function SettingsRow`。
 
+> `lucide-react` 是否有 `UserMinus`:先 `grep -c "UserMinus" node_modules/lucide-react/dist/lucide-react.d.ts`;沒有就改用 `X`。不要留下任何未使用的 import(`noUnusedLocals`)。
+
 - [ ] **Step 2: 型別檢查與手動驗證**
 
 Run: `pnpm build && pnpm test`
 Expected: 全綠。
 
-Run: `cd relay && npm run dev`(另一終端)+ `pnpm tauri dev`:Settings → Sync → 輸入裝置名 → Create → 24 詞視窗未勾選不可關閉 → 勾選 Continue → 狀態列顯示 Synced、Devices 含本機;Show 再次顯示同一組詞;把 relay 關掉再按 Sync now → 狀態變 Error 且 app 其他功能正常;Leave(不勾刪除)→ 回到未加入畫面,`~/.ssh/sshelter/hosts.config` 仍在。
+Run: `cd relay && npm run dev`(另一終端)+ `pnpm tauri dev`:Settings → Sync → 先把 Relay URL 改成 `http://sync.example.com` → 儲存被拒(https 訊息);改回 `http://127.0.0.1:8787` → OK。輸入裝置名 → Create → **狀態列已是 Synced、Devices 已含本機,但 24 詞視窗仍在**;未勾選不可關閉(Esc/點外面無效)→ 勾選 Continue → 遷入 wizard 開啟。Show 再次顯示同一組詞。用亂序/錯字的 24 詞 Join(先 Leave)→ toast 可讀錯誤、textarea 內容保留。把 relay 關掉再按 Sync now → 狀態變 Error 且 app 其他功能正常;Leave(不勾刪除)→ 回到未加入畫面,`~/.ssh/sshelter/hosts.config` 仍在。
 
 - [ ] **Step 3: Commit**
 
@@ -628,14 +721,14 @@ git commit -m "feat(sync): settings pane to create, join, inspect and leave a sy
 
 ---
 
-### Task 3: 遷入 wizard 與同名主機處理
+### Task 3: 遷入 wizard 與同名主機處理(檔案定位)
 
 **Files:**
 - Create: `src/components/SyncMigrationDialog.tsx`
 - Modify: `src/App.tsx`(掛載 `<SyncMigrationDialog />`)
 
 **Interfaces:**
-- Consumes: `groupHostsForMigration`、`useMigrateHosts`、`useDuplicateAliases`、`useSyncStatus`、`useHostsQuery`、`useRenameHost`(`{ alias, patterns }`)、`useRemoveHost`(`{ alias }`)、`labelsFor`(`@/lib/host-display`)、ui store `syncMigrationOpen`
+- Consumes: `groupHostsForMigration`、`useMigrateHosts`、`useDuplicateAliases`、`useResolveShadowed`、`useSyncStatus`、`useHostsQuery`、`labelsFor`(`@/lib/host-display`)、`basename`(`@/lib/utils`)、ui store `syncMigrationOpen`
 - Produces: `<SyncMigrationDialog />`
 
 - [ ] **Step 1: 實作**
@@ -647,10 +740,10 @@ import { useEffect, useMemo, useState } from "react";
 import { Loader2 } from "lucide-react";
 import { toast } from "sonner";
 
-import { useHostsQuery, useRemoveHost, useRenameHost } from "@/lib/queries";
+import { useHostsQuery } from "@/lib/queries";
 import { labelsFor } from "@/lib/host-display";
 import { groupHostsForMigration } from "@/lib/sync-migration";
-import { useDuplicateAliases, useMigrateHosts, useSyncStatus } from "@/lib/sync";
+import { useDuplicateAliases, useMigrateHosts, useResolveShadowed, useSyncStatus } from "@/lib/sync";
 import { useSettingsStore } from "@/stores/settings";
 import { useUiStore } from "@/stores/ui";
 import { basename } from "@/lib/utils";
@@ -661,7 +754,8 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 /**
  * "Move hosts into sync": pick existing hosts (grouped by file) to move into the
  * synced file, optionally tagging them with their old file's name; then resolve
- * aliases that the synced file now shadows.
+ * aliases that the synced file now shadows — addressed by file, never by
+ * first-match, so the synced copy is never touched.
  */
 export function SyncMigrationDialog() {
   const open = useUiStore((s) => s.syncMigrationOpen);
@@ -679,8 +773,7 @@ function MigrationFlow({ onClose }: { onClose: () => void }) {
   const fileAliases = useSettingsStore((s) => s.fileAliases);
   const migrate = useMigrateHosts();
   const duplicates = useDuplicateAliases(true);
-  const rename = useRenameHost();
-  const remove = useRemoveHost();
+  const resolve = useResolveShadowed();
   const [tagByFile, setTagByFile] = useState(true);
   const [selected, setSelected] = useState<Set<string>>(new Set());
 
@@ -757,15 +850,15 @@ function MigrationFlow({ onClose }: { onClose: () => void }) {
       {dups.length > 0 && (
         <div className="space-y-1.5 rounded-md border border-amber-500/40 bg-amber-500/10 p-3 text-xs">
           <p className="font-medium text-amber-700 dark:text-amber-400">Synced hosts shadow local definitions</p>
-          <p className="text-muted-foreground">The synced file is included first, so these local blocks are ignored by ssh:</p>
+          <p className="text-muted-foreground">The synced file is included first, so ssh ignores these local blocks. Keep the local one under a new name, or remove it and use the synced version:</p>
           {dups.map((d) => (
             <div key={`${d.alias}-${d.local_file}`} className="flex items-center justify-between gap-2">
               <span className="font-mono">{d.alias} <span className="text-muted-foreground">in {basename(d.local_file)}</span></span>
               <div className="flex gap-1">
-                <Button type="button" variant="outline" size="sm" className="h-6 px-2 text-xs" disabled={rename.isPending} onClick={() => rename.mutate({ alias: d.alias, patterns: [`${d.alias}-local`] }, { onSuccess: () => duplicates.refetch() })}>
+                <Button type="button" variant="outline" size="sm" className="h-6 px-2 text-xs" disabled={resolve.isPending} onClick={() => resolve.mutate({ alias: d.alias, file: d.local_file, action: "rename" })}>
                   Keep as {d.alias}-local
                 </Button>
-                <Button type="button" variant="outline" size="sm" className="h-6 px-2 text-xs text-destructive" disabled={remove.isPending} onClick={() => remove.mutate({ alias: d.alias }, { onSuccess: () => duplicates.refetch() })}>
+                <Button type="button" variant="outline" size="sm" className="h-6 px-2 text-xs text-destructive" disabled={resolve.isPending} onClick={() => resolve.mutate({ alias: d.alias, file: d.local_file, action: "remove" })}>
                   Remove local
                 </Button>
               </div>
@@ -787,8 +880,6 @@ function MigrationFlow({ onClose }: { onClose: () => void }) {
 }
 ```
 
-> `useRenameHost` 的變數形狀以 `src/lib/queries.ts` 現況為準(`{ alias, patterns }`);`useRemoveHost` 的 `remove.mutate({ alias })` 會刪掉**本地**那份重複區塊 —— 同步檔的那份不受影響,因為 `config_remove_host` 依 alias 找到的是第一個定義… **注意**:`find_host_file_index` 會先命中同步檔(Include 在前)。因此「Remove local」必須刪指定檔案的區塊:若 `config_remove_host` 無法指定檔案,改為只提供「Keep as `<alias>-local`」一個動作(rename 同樣可能命中同步檔 —— 需驗證 `config_rename_host` 是否按第一個命中)。實作前先讀 `commands.rs` 的 `find_host_file_index`;若確認會命中同步檔,把兩顆按鈕改成一顆「Open in editor」(`setSelectedAlias(alias)`),讓使用者在編輯器裡處理,並在此註明限制。
-
 `src/App.tsx`:`import { SyncMigrationDialog } from "@/components/SyncMigrationDialog";` 並在 `<NewConfigFileDialog />` 後掛 `<SyncMigrationDialog />`。
 
 - [ ] **Step 2: 型別檢查、測試、手動驗證**
@@ -796,13 +887,13 @@ function MigrationFlow({ onClose }: { onClose: () => void }) {
 Run: `pnpm build && pnpm test`
 Expected: 全綠。
 
-手動:在已加入的裝置開 Settings → Sync → Choose hosts… → 清單依檔案分組、預設全選、wildcard 不出現 → Move → toast 顯示數量;sidebar 依 tag 模式看到原檔名 tag;第二台加入後,若本地有同名主機,對話框出現 amber 區塊。
+手動:在已加入的裝置開 Settings → Sync → Choose hosts… → 清單依檔案分組、預設全選、wildcard 不出現 → Move → toast 顯示數量;sidebar 依 tag 模式看到原檔名 tag;在主 config 手動加一個與同步主機同名的 `Host`,重開對話框 → amber 區塊出現 → 「Keep as -local」後主 config 那份改名、`hosts.config` 那份原封不動(`cat` 兩個檔案確認);「Remove local」只刪主 config 那份。
 
 - [ ] **Step 3: Commit**
 
 ```bash
 git add src/components/SyncMigrationDialog.tsx src/App.tsx
-git commit -m "feat(sync): migration wizard for moving hosts into the synced file"
+git commit -m "feat(sync): migration wizard with file-addressed shadowed alias handling"
 ```
 
 ---
@@ -828,9 +919,11 @@ Features 清單(在 AI Access 條目之後)加:
 
 Open **Settings → Sync**. *Create* shows a 24-word recovery phrase — store it in a password manager; it is the only secret and anyone holding it can read your synced hosts. On another computer choose *Join* and paste the words.
 
-Synced hosts live in `~/.ssh/sshelter/hosts.config`, which SSHelter `Include`s from your main config, so plain `ssh` keeps working and the file survives uninstalling SSHelter. Use *Choose hosts…* to move existing hosts in (optionally tagged with their old file name). Hosts in other files stay local to that computer.
+Synced hosts live in `~/.ssh/sshelter/hosts.config`, which SSHelter `Include`s at the top of your main config, so plain `ssh` keeps working and the file survives uninstalling SSHelter. Use *Choose hosts…* to move existing hosts in (optionally tagged with their old file name). Hosts in other files stay local to that computer.
 
-The relay stores only ciphertext and can be self-hosted from `relay/` (`npx wrangler deploy`); point *Settings → Sync → Relay URL* at yours.
+*Forget device* only removes a device from the list; a device that still has the phrase keeps syncing. If a device is lost, leave the chain, start a new one on the devices you keep, and rotate the keys it could see.
+
+The relay stores only ciphertext and can be self-hosted from `relay/` (`npx wrangler deploy`); point *Settings → Sync → Relay URL* at yours (`https://` required, except `localhost` for development).
 ```
 
 - [ ] **Step 2: 驗證清單文件**
@@ -840,25 +933,36 @@ The relay stores only ciphertext and can be self-hosted from `relay/` (`npx wran
 ```markdown
 # Sync chain — manual end-to-end verification (Phase A)
 
-Setup: relay `cd relay && npm run dev`; device A = `pnpm tauri dev`; device B = second checkout
-with `SSHELTER_CONFIG`-style custom config path (Settings → Files → custom config path) pointing
-at a temp dir seeded with `Host b-only`.
+Setup: relay `cd relay && npm run dev` reachable from both devices. Device A and device B must be
+**two OS user accounts, a VM, or two physical machines** — a second checkout with a custom config
+path is NOT a second device: `~/.ssh/sshelter/`, `sync-state.json`, the device id and the keychain
+entry all follow the OS user, so two processes in one account would fight over the same sync assets.
 
-1. A: Create chain → words dialog blocks close until confirmed → Devices shows A.
+1. A: Settings → Sync → Relay URL `http://sync.example.com` is refused (https message); the local
+   `http://127.0.0.1:8787` is accepted. Create chain → the words dialog is still open while Status
+   already says Synced and Devices lists A → cannot close until confirmed → Continue opens the
+   migration wizard.
 2. A: Choose hosts… → move two hosts with "tag by file" → hosts.config contains both, tags added,
-   main config has `Include ~/.ssh/sshelter/hosts.config` above the first Host.
+   main config's first non-comment line is `Include ~/.ssh/sshelter/hosts.config` (above any
+   existing Include).
 3. B: Join with the words (paste with numbering) → migration dialog opens → hosts from A appear in
-   B's sidebar under "Synced" within 45 s; `ssh -G <alias>` on B resolves the synced HostName.
-4. B: edit a synced host → A shows the change within 45 s (no manual reload).
+   B's sidebar under "Synced" within 45 s **without pressing reload**; `ssh -G <alias>` on B
+   resolves the synced HostName.
+4. B: edit a synced host → A's sidebar/editor shows the change within 45 s (no manual reload).
 5. A and B offline (stop relay): edit the same host on both; A edits first, B second; start relay →
    B's text wins on both; A shows the "Sync overwrote a local change" toast.
 6. Hand-edit hosts.config on A with a text editor → A uploads the change (pending → 0) without
-   needing an app reload.
-7. A: Remove device B → B's next sync still works (Phase A does not revoke) but B disappears from
-   A's device list; B: Leave chain → B keeps hosts.config; Join again with words → back in sync.
-8. Wrong phrase on Join → readable error, form keeps the input. Relay stopped → Status "Error",
+   needing an app reload. While the relay is stopped, save an edit in A's UI, then start the relay:
+   the edit is still there afterwards (the round that raced it was discarded and re-run).
+7. A: Forget device B → B disappears from A's device list; B's next sync still works (by design —
+   Forget is not revocation, the copy says so). B: Leave chain → B keeps hosts.config; Join again
+   with the words → back in sync.
+8. Wrong phrase on Join (valid words, wrong chain) → "no sync chain matches" error, form keeps the
+   input, and the relay's `.wrangler/state` gains no new chain. Relay stopped → Status "Error",
    editing/connecting still works.
-9. Windows build: repeat 3–4 on the Windows device (paths under `C:\Users\…\.ssh\sshelter\`).
+9. B: add a local `Host <synced alias>` to the main config → wizard shows the amber "shadow" block →
+   "Keep as -local" renames only the main-config copy; "Remove local" removes only that copy.
+10. Windows build: repeat 3–4 on the Windows device (paths under `C:\Users\…\.ssh\sshelter\`).
 ```
 
 - [ ] **Step 3: 全套與 Commit**
@@ -875,7 +979,7 @@ git commit -m "docs(sync): describe sync chain setup and record the manual verif
 
 ## Self-review(已執行)
 
-- **Spec 覆蓋**:§7 Settings Sync pane(未加入/建立後/已加入、Show pairing code、裝置清單、relay URL、Leave)→ Task 2;§7 新裝置上手(Join → 遷入對話框)與 §10 wizard 主機/tag 部分、同名主機處理 → Task 3;事件與焦點觸發 → Task 1;「Synced」預設顯示名 → Task 2 `labelManagedFile`;§7 Keys dialog 開關與金鑰警示、`Sync passwords` 開關屬 Phase B,刻意不在此。
-- **型別一致**:hooks 的 command 名稱與 A3 註冊清單一致(`sync_status`…`sync_duplicate_aliases`);`SyncStatus` 欄位(`managed_file`、`hosts_in_sync`、`devices[].is_this`)與 A3 `status_from` 一致。
-- **Review Focus 對應**:1 → Task 1 `cleanWordsInput` 測試;2 → Task 1 `groupHostsForMigration` 測試;3 → Task 2 的 `saved` 勾選守衛(escape/outside 阻擋);4 → Task 2 手動驗證第 8 項(後端 404 → toast,表單狀態保留);5 → Task 2 Leave 對話框預設 `deleteRemote=false` 與說明文字。
-- **已知風險**(Task 3 註記):「Remove local / Keep as -local」依賴 `config_remove_host`/`config_rename_host` 能定位到**非同步檔**的那份區塊;若既有實作以第一個命中為準,退化為「Open in editor」。實作者必須先讀 `find_host_file_index`。
+- **Spec 覆蓋**:§7 Settings Sync pane(未加入含 relay URL/建立後的確認畫面在父層/已加入、Show pairing code、裝置清單 Forget、relay URL、Leave、phrase cleanup 重試)→ Task 2;§7 新裝置上手(Join → 遷入對話框)與 §10 wizard 主機/tag 部分、檔案定位的同名主機處理 → Task 3;事件(status/applied/conflict)與焦點觸發 → Task 1;「Synced」預設顯示名 → Task 2 `labelManagedFile`;§2 Forget 不是撤權的文案 → Task 2 + README;§7 Keys dialog 開關與金鑰警示、`Sync passwords` 開關屬 Phase B,刻意不在此。
+- **型別一致**:hooks 的 command 名稱與 A3 註冊清單一致(`sync_status`、`sync_create_chain`、`sync_join_chain`、`sync_show_words`、`sync_leave_chain`、`sync_now`、`sync_set_relay_url`、`sync_set_device_name`、`sync_forget_device`、`sync_migrate_hosts`、`sync_duplicate_aliases`、`sync_resolve_shadowed`);`SyncStatus` 欄位(`managed_file`、`hosts_in_sync`、`devices[].is_this`、`phrase_cleanup_pending`、`read_only`)與 A3 `status_from` 一致;`sync_resolve_shadowed` 的 `action` 字串與 A3 `ShadowedAction` 的 serde 小寫一致;`sync://applied` payload 為數字。
+- **Review Focus 對應**:1 → Task 1 `cleanWordsInput` 測試;2 → Task 1 `groupHostsForMigration` 測試;3 → Task 2 的 `freshWords`/`saved` 在 `SyncPane`(escape/outside 阻擋)+ 手動驗證第 1 項;4 → Task 2 `onJoin` catch 保留 `words` + 手動第 8 項;5 → Task 2 Leave 對話框預設 `deleteRemote=false` 與說明文字;6 → Task 2 `RelayUrlRow` 在 `NotJoinedPane`;7 → Task 1 `sync://applied` listener + 手動第 3/4 項。
+- **Codex review(2026-09-27)已納入**:確認畫面被卸載(11)、shadowed 操作以第一個命中定位(12 → `useResolveShadowed` + A3 `sync_resolve_shadowed`)、一般遠端更新不刷新 cache(25 → `sync://applied`)、relay URL 只能在 joined 改(26)、useMutation 快取助記詞(27 → 直接 invoke + local state)、雙 checkout 不是兩台裝置(28)、重複宣告 `queryClient` 與未使用 `Label` import(29)、Forget device 文案(1)。
