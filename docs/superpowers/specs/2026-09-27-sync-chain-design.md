@@ -180,7 +180,48 @@ API(全部 `Authorization: Bearer <token>`,JSON):
   互改主機、同步私鑰後以 `ssh` 登入、移除裝置 → 輪替。
 - 既有測試不退:Rust、vitest、四平台 CI。
 
-## 10. 交付分期
+## 10. 既有版本的 migration 與相容性
+
+**升級不改行為**:sync 完全 opt-in。從 0.15.x 升上來的安裝,在使用者按下
+「Create / Join」之前,不建立 `~/.ssh/sshelter/`、不插 Include、不碰 keychain、
+不聯網。所有既有功能(config 編輯、部署、MCP)路徑不變。
+
+**首台裝置建立 chain 時的資料遷入(wizard,三步、皆可跳過)**
+1. **主機**:列出所有檔案中的非 wildcard 主機(依檔案分組、預設全選),以既有
+   `config_move_host`(byte-identical 區塊搬移、先備份)搬進 `hosts.config`。
+   `Host *` 等 wildcard 區塊是 config 結構、裝置本地,**不搬**。提供選項「以原檔名
+   加上 tag」(例如 `homelab.config` → tag `homelab`),讓依 tag 分組能延續原本的
+   檔案分組。搬移後空掉的 Include 檔保留不刪。
+2. **金鑰**:列出 `~/.ssh` 現有金鑰供勾選是否同步;預設勾選「被已搬入主機的
+   `IdentityFile` 引用」的那些;硬體/無私鑰檔者不可勾。
+3. **密碼**:若本機開啟「Sync passwords」,把已搬入主機在 keychain 的密碼建成記錄。
+
+**後續裝置加入時的既有資料處理**
+- 該裝置本地已有主機:Include 插在主檔頂部 → 依 ssh 的 first-match 語意,**同步檔
+  的同名主機會遮蔽本地定義**。加入 wizard 用既有 lint 的「shadowed alias」偵測
+  列出重複,逐筆選擇:保留本地(把本地區塊改名 `<alias>-local`)/ 改用同步版
+  (移除本地區塊,先備份)/ 稍後處理(維持遮蔽並在 sidebar 標示)。
+- 本地已有同名但不同內容的金鑰檔:不覆蓋,提示改名後重試(§3.3)。
+- 本地 keychain 已有同 alias 密碼且「Sync passwords」開啟:以記錄 LWW 決定,
+  並在完成頁列出被覆蓋的項目。
+
+**資料格式版本化**
+- 每筆記錄 payload 含 `schema: 1`;chain 有一筆 `meta` 記錄(`schema_version`、
+  `created_by_app_version`)。client 支援版本 < chain `schema_version` → 唯讀模式
+  (仍套用可理解的記錄、不上傳、顯示「請更新 SSHelter」)。未知 `kind` 一律忽略保留。
+- `sync-state.json` 含 `version`,讀取時逐版遷移;無法解析 → 視為未加入並提示。
+- 前端 settings envelope 不新增欄位(sync 狀態全在 Rust 端),既有匯出/匯入不受影響;
+  `hosts.config` 建立時若 `fileAliases` 無設定則預設顯示名「Synced」。
+
+**降級與退出的安全網**
+- `hosts.config` 只是一般 ssh config + 一行 `Include`,**退回舊版 SSHelter 或純
+  OpenSSH 都照常運作**,主機不會消失。
+- Leave chain 保留所有本機檔案;「Move out of synced」可把主機搬回任一檔案。
+- 既有 MCP allowlist 以 alias 為 key,主機搬移檔案不影響。
+- 既有部署功能寫回的 `IdentityFile ~/.ssh/<name>` 與 §3.3 的金鑰路徑規則一致,
+  舊資料無需轉換。
+
+## 11. 交付分期
 
 1. **Phase A — 核心**:crypto、relay(Worker)、sync engine(host + device 記錄)、
    Settings Sync pane、配對/上手流程、受管同步檔 + Include。
