@@ -152,9 +152,10 @@ API(全部 `Authorization: Bearer <token>`,JSON):
 - 每筆 `ciphertext` ≤ 64 KiB;每 chain 儲存總量 ≤ 1 MiB(**含 tombstone 與 nonce**)、
   記錄數 ≤ 4096;request body ≤ 1 MiB:以 byte 上限的**串流**讀取,超過即取消回 `413`,
   不把整個 body 讀進記憶體再檢查;之後才 JSON 解析。
-- 每 chain 每分鐘 ≤ 120 次請求(`429`)。
-- **跨 chain 的防線**(每個來源 IP,`CF-Connecting-IP`):每小時最多建立 20 條 chain、所有請求
-  合計 ≤ 1200 次(`429`)。**未建立的 chain 被讀取(GET/POST/DELETE)一律 `404` 且不配置任何
+- 每 chain 每分鐘 ≤ 120 次請求(所有端點都計,含建鏈那一次;已授權但超限一律 `429`,不論 PUT/GET/
+  POST/DELETE)。
+- **跨 chain 的防線**(每個來源 IP,`CF-Connecting-IP`):每小時最多 20 次建鏈請求(`PUT`,
+  不論結果是 201/200/404 —— 計的是嘗試,不是成功建立的 chain 數)、所有請求合計 ≤ 1200 次(`429`)。**未建立的 chain 被讀取(GET/POST/DELETE)一律 `404` 且不配置任何
   儲存**:DO 只在 `PUT` 建立時才建 schema,其餘 RPC 先看 `sqlite_master` 有沒有 `meta` 表,
   沒有就 404 —— 讀不存在的 chain 不能留下持久化的空資料庫。
 - 閒置 180 天自動清除;**成功授權的 pull 也刷新閒置期限**(節流:同一 instance 每 6 小時最多
@@ -168,8 +169,8 @@ API(全部 `Authorization: Bearer <token>`,JSON):
   remote_schema_version, records: {明文快取,只有 host/device/meta}, sealed: {未處理種類的
   原始 envelope}, last_sync_ms, last_error }`。
 - 觸發:app 啟動、視窗取得焦點、每 45 秒、本地變更後立即。
-- **基線輪**:剛 Create/Join 的第一輪(`baseline_established = false`)**不做本機 diff**,先
-  pull 並以 chain 為準套用 —— chain 上仍存在的區塊以 chain 版本覆蓋本機同名區塊;chain 上已
+- **基線輪**:剛 Join 的第一輪(`baseline_established = false`;Create 的 chain 是空的,建立時直接
+  視為已建立基線)**不做本機 diff**,先 pull 並以 chain 為準套用 —— chain 上仍存在的區塊以 chain 版本覆蓋本機同名區塊;chain 上已
   tombstone、本機同步檔卻還留著的區塊被移除(`persist_file` 先備份);chain 不認識的區塊保留。
   成功後 `baseline_established = true` 並立刻再跑一輪,本機獨有的區塊才以新主機上傳。
   少了這一步,Leave 後保留的舊區塊會在重新加入時以「現在」的時間戳復活遠端的刪除。
@@ -177,8 +178,10 @@ API(全部 `Authorization: Bearer <token>`,JSON):
   1. 讀取受管檔目前的區塊(磁碟指紋與 in-memory 不同就先重載),記下本輪的**檔案指紋**與
      **檔案 mtime**。
   2. 本機 diff → 產生 dirty 記錄(升版本、單調時間戳)並**立刻持久化**。本機變更的
-     `updated_at_ms` 取受管檔的 mtime(= 存檔當下,UI 存檔與外部編輯皆然),不是同步執行緒
-     掃到的時間;離線時也一樣,重試沿用同一版本與時間戳。心跳(device 記錄)才用現在時間。
+     `updated_at_ms` 是**逐區塊**的修改時間:app 自己存檔的區塊 = 存檔當下(`persist_file` 寫完
+     受管檔時逐區塊比對前一次快照並記下時間);外部編輯的區塊 = gather 時的檔案 mtime(整檔的
+     近似值,文件明示此限制)。不是同步執行緒掃到的時間,也不會把別的區塊較晚的修改時間套到
+     較早修改的區塊上;離線時也一樣,重試沿用同一版本與時間戳。心跳(device 記錄)才用現在時間。
   3. `pull(since = cursor_seq)`:逐筆解密、驗證身分、LWW 合併;結果先留在記憶體(含
      `cursor_seq = latestSeq`)。
   4. **套用到本機**:短暫鎖 doc,先比對第 1 步的指紋 —— 受管檔若在這段網路時間內被改過
@@ -186,7 +189,10 @@ API(全部 `Authorization: Bearer <token>`,JSON):
      (下一輪的 diff 會把新的本機編輯變成更新的 dirty 記錄,LWW 自然正確);指紋相同才把
      host 效果寫進 `hosts.config`(經既有 `persist_file`),並把合併後的記錄與 cursor 持久化。
      沒有 host 效果時免比指紋(只有 device/meta 變動,與檔案無關)。效果先套在區塊副本上;
-     持久化失敗(非 Conflict)時還原 in-memory 區塊,不留下與磁碟不一致的 doc。
+     **套不上的 alias**(本機同名區塊含 wildcard 等)**不進快取**(其記錄退回合併前的本機版本或移除)
+     並計入 `last_error`,否則下一輪會把它當成本機刪除而產生 tombstone。持久化失敗時先退回舊區塊、
+     再從磁碟重載(磁碟可能已是新內容:寫入成功但指紋計算失敗),讓 in-memory 與磁碟一致;
+     重載也失敗才回報錯誤。
   5. `push(dirty)`(分批:每批 ≤ 200 筆且 ≤ 512 KiB;唯讀模式略過)。**accepted 的 seq 只更新
      該筆 `LocalRecord.seq` 並清 dirty,絕不推進 `cursor_seq`**(否則會跳過其他裝置在中間寫入
      的序號);`conflict` 的記錄本輪不處理,只標記「立刻再跑一輪」,下一輪 pull 會拿到它。
@@ -196,7 +202,8 @@ API(全部 `Authorization: Bearer <token>`,JSON):
   勝過修改;再相同則 `device_id` 字典序小者勝。輸的一方若是本地未上傳的修改 → `sync://conflict`
   toast「web-1 was changed on MacBook, your local edit was replaced」。
 - **遠端 host 記錄的三種結果**:`Upsert{alias, text}`(合併前就以 `validate_host_text` 檢查:
-  恰好一個 Host 區塊、第一個 pattern 等於 alias、所有 pattern 皆非 wildcard)/
+  文字**只能**含恰好一個 Host 區塊 —— 不得夾帶 Match、全域指令或區塊外的註解,否則套用後
+  的檔案與快取不一致 —— 且第一個 pattern 等於 alias、所有 pattern 皆非 wildcard)/
   `Delete{alias}`(**只有**驗證過的 `deleted = true`)/ `Skip`(解不開、身分不符、payload 格式
   不支援、文字不是合法區塊、wildcard)。Skip 的記錄**不進快取**——否則套用失敗的記錄會在下一輪
   被當成「快取有、檔案沒有」而產生 tombstone,把別台的主機刪掉。格式不支援**絕不**當成刪除。
@@ -206,11 +213,14 @@ API(全部 `Authorization: Bearer <token>`,JSON):
 - **唯讀模式**:chain 的 `meta.schema_version` 持久化為 `remote_schema_version`;**每輪開始**
   用它判斷(不是只看本輪有沒有收到 meta)。比本 app 新 → 只套用可理解的記錄、不上傳、狀態列
   顯示「請更新 SSHelter」。
-- **生命週期與同步的互斥**:runtime 有 `generation` 計數。Create/Join/Leave 在**持有 doc 鎖**
-  的情況下 +1 並換掉狀態/金鑰 —— 與 `apply_effects` 的寫檔互斥;`apply_effects` 在 doc 鎖內、
-  寫檔前再比一次 generation,回寫狀態(`commit_state`)也比。改 relay URL、改裝置名、Forget
-  device 這些只動狀態的命令同樣 +1(先 +1 再改狀態),在途輪次的整份狀態副本才不會蓋掉它們的
-  修改。比對不同就整輪丟棄——避免在途的舊輪次用舊 keys 寫檔、或把已離開的 chain 狀態整份放回去。
+- **生命週期與同步的互斥**:runtime 的 `generation`、狀態、金鑰放在**同一把鎖**裡(`SyncCore`),
+  永遠一起快照、一起替換 —— 分開鎖會出現「新 generation + 舊狀態」的交錯。同步輪次開始時一次
+  取得三者的快照;`apply_effects` 在 doc 鎖內、寫檔前再比一次 generation,回寫狀態(`commit_state`)
+  也比;不同就整輪丟棄。Create/Join/Leave 全程持有一把 **lifecycle 鎖**(含網路等待與 keychain
+  讀寫,跑在 `spawn_blocking`),彼此互斥、前置檢查也在鎖內 —— 舊 Leave 不可能刪掉新 Join 剛存的
+  助記詞,兩個 Join 也不可能同時通過檢查;換 generation/狀態/金鑰時再短暫持有 doc 鎖(與寫檔互斥),
+  鎖順序固定為 lifecycle → doc → core。改 relay URL、改裝置名、Forget device 這些只動狀態的命令
+  在 core 鎖內「+1 並改狀態」一次完成。
 - **從本機產生記錄**:兩個時機做「區塊 diff」——(a)SSHelter 自己對 `hosts.config`
   的每次 `persist_file` 之後(喚醒同步執行緒);(b)同步 tick 時檔案指紋與上次不同(使用者
   手改)。diff = 逐區塊序列化後與快取比對,變了就升版本、標 dirty,消失的區塊 tombstone。

@@ -2,24 +2,24 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** 把 A1 的基礎串成會動的同步:偵測本機變更 → 持久化 dirty → pull/merge → 在指紋守衛下套用到受管檔 → 分批 push(純函式、以假中繼測試)→ 背景執行緒與 Tauri commands → 主機遷入、重複 alias 偵測與檔案定位的處理。完成後 A4 只需要接 UI。
+**Goal:** 把 A1 的基礎串成會動的同步:偵測本機變更(逐區塊時間戳)→ 持久化 dirty → pull/merge → 在指紋與 generation 守衛下套用到受管檔 → 分批 push(純函式、以假中繼測試)→ 背景執行緒與 Tauri commands(lifecycle 互斥)→ 主機遷入、重複 alias 偵測與檔案定位的處理。完成後 A4 只需要接 UI。
 
-**Architecture:** `planner`(本機 diff)與 `reconcile`(`plan_local` / `pull_merge` / `push_dirty` 三段純函式,對 `Relay` trait)以記憶體假中繼模擬多台裝置測試;`engine` 負責一輪的順序(spec §6)、doc 鎖與檔案指紋守衛、runtime generation 守衛、狀態持久化與事件;lifecycle commands 走 `tauri::async_runtime::spawn_blocking`(`reqwest::blocking` 不能在 tokio runtime 內跑)。背景執行緒用 `mpsc::recv_timeout(45s)` 等喚醒。
+**Architecture:** `planner`(本機 diff)與 `reconcile`(`plan_local` / `pull_merge` / `push_dirty` 三段純函式,對 `Relay` trait)以記憶體假中繼模擬多台裝置測試;`engine` 負責一輪的順序(spec §6)、`SyncCore`(generation/狀態/金鑰同一把鎖)、doc 鎖與檔案指紋守衛、逐區塊修改時間(`BlockTracker`)、套用失敗回饋快取、狀態持久化與事件;lifecycle commands 在 `tauri::async_runtime::spawn_blocking` 裡跑並全程持有 lifecycle 鎖(`reqwest::blocking` 不能在 tokio runtime 內跑)。背景執行緒用 `mpsc::recv_timeout(45s)` 等喚醒。鎖順序固定:lifecycle → doc → core。
 
 **Tech Stack:** Rust、Tauri 2(`AppHandle`、`Emitter`、`Manager`、`async_runtime::spawn_blocking`)、ts-rs(bindings)、A1 全部模組。
 
-**Spec:** `docs/superpowers/specs/2026-09-27-sync-chain-design.md` §6(引擎:一輪的順序、cursor、generation、sealed、唯讀)、§3.1(受管檔)、§10(migration、shadowed alias)
+**Spec:** `docs/superpowers/specs/2026-09-27-sync-chain-design.md` §6(引擎:基線輪、一輪的順序、cursor、generation 與 lifecycle 互斥、sealed、唯讀)、§3.1(受管檔)、§10(migration、shadowed alias)
 
 ## Global Constraints
 
 - 同 A1:繁中註解、英文識別字/UI 文案、Conventional Commits、三平台 `cargo test` 全綠、祕密不進 log。
-- 引擎**絕不**在鎖住 `AppState.doc` 或 `sync.state` 的情況下做網路 I/O;`RelayClient` 只在同步執行緒(std thread)或 `spawn_blocking` 裡建立與使用。
+- 引擎**絕不**在鎖住 `AppState.doc` 或 `sync.core` 的情況下做網路 I/O;`RelayClient` 只在同步執行緒(std thread)或 `spawn_blocking` 裡建立與使用。
 - **cursor 只隨 pull 的 `latestSeq` 前進;push 回來的 seq 只更新該筆 `LocalRecord.seq`。**
-- 本機 diff 產生的 dirty 記錄在任何網路操作之前先持久化;記錄的 `updated_at_ms` = 受管檔的 mtime(存檔當下),心跳才用現在時間;重試沿用原版本/時間戳。
-- 剛 Create/Join 的第一輪是**基線輪**(`baseline_established = false`):不做本機 diff,先 pull 並以 chain 為準套用(含移除 chain 上已 tombstone、本機卻還留著的區塊),成功後才設 true 並立刻再跑一輪。
-- 套用遠端效果前必須比對 gather 時的檔案指紋(in-memory 與磁碟都比);不同就整輪丟棄(cursor 不前進)並立刻再跑一輪。持久化失敗(非 Conflict)時還原 in-memory 區塊。
-- runtime `generation`:Create/Join/Leave 在**持有 doc 鎖**時 +1 並換狀態/金鑰(與 `apply_effects` 的寫檔互斥);改 relay URL、改裝置名、Forget device 也 +1(先 +1 再改狀態)。同步輪次在 `apply_effects`(doc 鎖內、寫檔前)與每次 `commit_state` 重新比對,不同就丟棄。
-- 遠端 host 記錄只有三種結果:`Upsert`(文字先通過 `hosts_file::validate_host_text`)/ `Delete`(只有驗證過的 `deleted = true`)/ 略過(**不進快取**);格式不支援、文字不合法或 wildcard **絕不**當成刪除。
+- 本機 diff 產生的 dirty 記錄在任何網路操作之前先持久化;記錄的 `updated_at_ms` 是**逐區塊**的:app 存檔的區塊 = 存檔當下(`note_file_written` 記錄),外部編輯的區塊 = gather 時的檔案 mtime;心跳才用現在時間;重試沿用原版本/時間戳。
+- 剛 Join 的第一輪是**基線輪**(`baseline_established = false`;Create 直接 true):不做本機 diff,先 pull 並以 chain 為準套用(含移除 chain 上已 tombstone、本機卻還留著的區塊),成功後才設 true 並立刻再跑一輪。
+- 套用遠端效果前必須比對 gather 時的檔案指紋(in-memory 與磁碟都比);不同就整輪丟棄(cursor 不前進)並立刻再跑一輪。**套不上的 alias 不進快取**(退回合併前的本機版本或移除)並記入 `last_error`。持久化失敗先退回舊區塊、再從磁碟重載。
+- `SyncCore { generation, state, keys }` 在同一把鎖裡,永遠一起快照、一起替換;`apply_effects` 在 doc 鎖內、寫檔前比 generation,`commit_state` 也比。Create/Join/Leave 全程持有 lifecycle 鎖(含前置檢查、網路、keychain);換 generation/狀態/金鑰時再持 doc 鎖。只動狀態的命令用 `mutate_state`(同一臨界區 +1 並改狀態)。
+- 遠端 host 記錄只有三種結果:`Upsert`(文字先通過 `hosts_file::validate_host_text`:只含一個 Host 區塊)/ `Delete`(只有驗證過的 `deleted = true`)/ 略過(**不進快取**);格式不支援、文字不合法或 wildcard **絕不**當成刪除。
 - 本版不處理的種類(key/password/未知)以原始 envelope 存進 `state.sealed`,不解密。
 - 唯讀模式每輪從 `state.remote_schema_version` 判斷(持久化),不是只看本輪。
 - Join 只用 `GET …/records?since=0` 驗證,404 → 「no sync chain matches this recovery phrase」,絕不 PUT;只有 Create 用 PUT。
@@ -38,11 +38,13 @@
 7. 受管檔在 app 未察覺時被手改、或在網路期間被 UI 存檔 —— 同步前先比指紋重載;套用前再比一次,變了就丟棄本輪(Task 3 `apply_effects`;手動驗證)。
 8. 一次遷入 450 台主機 —— push 必須分批(Task 2 `pushes_are_batched_by_count`)。
 9. 遠端記錄的 payload 結構正確但文字不是合法區塊 —— 合併前就擋掉、不進快取,下一輪不得因此產生 tombstone(Task 2 `invalid_host_text_is_skipped_and_not_cached`)。
-10. Leave 後 `hosts.config` 保留舊主機、別台刪了其中一台、再 Join —— 基線輪以 chain 為準,舊區塊不得復活遠端的刪除(Task 3 `run_round` 基線分支;手動驗證第 5 項)。
+10. Leave 後 `hosts.config` 保留舊主機、別台刪了其中一台、再 Join —— 基線輪以 chain 為準,舊區塊不得復活遠端的刪除(Task 3 `run_round` 基線分支;手動驗證)。
+11. 同一台上先改 `web`(t100)、再改另一台主機(t300),worker 才來收 —— `web` 的時間戳必須是 t100,不是整檔的 t300(Task 1 `each_changed_block_carries_its_own_change_time`、Task 3 `block_tracker_stamps_only_what_changed`)。
+12. 遠端合法的 `Host web` 撞到本機 `Host web *.internal` 而套不上 —— 不得進快取,下一輪不得因此 tombstone 掉別台的 `web`(Task 3 `drop_unapplied`;`a_broken_effect_does_not_stop_the_others` 回傳失敗 alias)。
 
 ---
 
-### Task 1: `sync::planner` —— 本機變更偵測
+### Task 1: `sync::planner` —— 本機變更偵測(逐區塊時間)
 
 **Files:**
 - Create: `src-tauri/src/sync/planner.rs`
@@ -52,7 +54,7 @@
 - Consumes: `record::{Record, RecordKind, LocalRecord, HostPayload, record_key, SCHEMA_VERSION}`、`hosts_file::HostBlockText`
 - Produces:
   - `pub fn next_timestamp(now_ms: u64, previous: Option<u64>) -> u64`
-  - `pub fn detect_local_changes(cached: &BTreeMap<String, LocalRecord>, current: &[HostBlockText], device_id: &str, now_ms: u64) -> Vec<Record>`
+  - `pub fn detect_local_changes(cached: &BTreeMap<String, LocalRecord>, current: &[HostBlockText], device_id: &str, changed_at: impl Fn(&str) -> u64) -> Vec<Record>`(`changed_at(alias)` = 該區塊的修改時間;消失的區塊也用它決定 tombstone 時間)
 
 - [ ] **Step 1: 寫失敗的測試**
 
@@ -60,6 +62,7 @@
 
 ```rust
 //! 本機變更偵測:把受管檔目前的 Host 區塊與快取記錄比對,產生要上傳的新版記錄。
+//! 時間戳逐區塊(由呼叫端提供),不是一個整檔的時間。
 
 use std::collections::BTreeMap;
 
@@ -100,7 +103,7 @@ mod tests {
 
     #[test]
     fn new_block_becomes_a_version_one_record() {
-        let out = detect_local_changes(&BTreeMap::new(), &[block("a", "Host a\n")], "dev-a", 10);
+        let out = detect_local_changes(&BTreeMap::new(), &[block("a", "Host a\n")], "dev-a", |_| 10);
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].id, "a");
         assert_eq!(out[0].version, 1);
@@ -114,8 +117,8 @@ mod tests {
         let mut map = BTreeMap::new();
         let (k, v) = cached("a", "Host a\n", 3, 50, false);
         map.insert(k, v);
-        assert!(detect_local_changes(&map, &[block("a", "Host a\n")], "dev-a", 60).is_empty());
-        let out = detect_local_changes(&map, &[block("a", "Host a\n  User x\n")], "dev-a", 40);
+        assert!(detect_local_changes(&map, &[block("a", "Host a\n")], "dev-a", |_| 60).is_empty());
+        let out = detect_local_changes(&map, &[block("a", "Host a\n  User x\n")], "dev-a", |_| 40);
         assert_eq!(out[0].version, 4);
         assert_eq!(out[0].updated_at_ms, 51, "clock skew must not lose to the previous version");
     }
@@ -125,15 +128,16 @@ mod tests {
         let mut map = BTreeMap::new();
         let (k, v) = cached("gone", "Host gone\n", 1, 5, false);
         map.insert(k, v);
-        let out = detect_local_changes(&map, &[], "dev-a", 9);
+        let out = detect_local_changes(&map, &[], "dev-a", |_| 9);
         assert_eq!(out.len(), 1);
         assert!(out[0].deleted);
         assert_eq!(out[0].version, 2);
+        assert_eq!(out[0].updated_at_ms, 9);
         // 已是 tombstone 就不再重複產生。
         let (k, v) = cached("gone", "", 2, 9, true);
         let mut map2 = BTreeMap::new();
         map2.insert(k, v);
-        assert!(detect_local_changes(&map2, &[], "dev-a", 20).is_empty());
+        assert!(detect_local_changes(&map2, &[], "dev-a", |_| 20).is_empty());
     }
 
     #[test]
@@ -141,7 +145,7 @@ mod tests {
         let mut map = BTreeMap::new();
         let (k, v) = cached("back", "", 2, 9, true);
         map.insert(k, v);
-        let out = detect_local_changes(&map, &[block("back", "Host back\n")], "dev-a", 30);
+        let out = detect_local_changes(&map, &[block("back", "Host back\n")], "dev-a", |_| 30);
         assert_eq!(out.len(), 1);
         assert!(!out[0].deleted);
         assert_eq!(out[0].version, 3);
@@ -154,7 +158,26 @@ mod tests {
         v.record.kind = RecordKind::Device;
         map.insert(k, v);
         // device 記錄不是主機,消失的區塊清單裡不能出現它。
-        assert!(detect_local_changes(&map, &[], "dev-a", 9).is_empty());
+        assert!(detect_local_changes(&map, &[], "dev-a", |_| 9).is_empty());
+    }
+
+    #[test]
+    fn each_changed_block_carries_its_own_change_time() {
+        // 先改 a(t100)、後改 b(t300),worker 才來收:a 不能被套上 b 的時間。
+        let mut map = BTreeMap::new();
+        let (k, v) = cached("a", "Host a\n", 1, 10, false);
+        map.insert(k, v);
+        let (k, v) = cached("b", "Host b\n", 1, 10, false);
+        map.insert(k, v);
+        let mut out = detect_local_changes(
+            &map,
+            &[block("a", "Host a\n  User x\n"), block("b", "Host b\n  User y\n")],
+            "dev-a",
+            |alias| if alias == "a" { 100 } else { 300 },
+        );
+        out.sort_by(|x, y| x.id.cmp(&y.id));
+        assert_eq!(out[0].updated_at_ms, 100);
+        assert_eq!(out[1].updated_at_ms, 300);
     }
 }
 ```
@@ -182,11 +205,12 @@ fn host_text(payload: &Value) -> Option<String> {
 }
 
 /// 比對受管檔目前的區塊與快取:新增/修改 → 新版記錄;消失 → tombstone(僅一次)。
+/// `changed_at(alias)` 是該區塊的修改時間(app 存檔當下或外部編輯的檔案 mtime),由呼叫端提供。
 pub fn detect_local_changes(
     cached: &BTreeMap<String, LocalRecord>,
     current: &[HostBlockText],
     device_id: &str,
-    now_ms: u64,
+    changed_at: impl Fn(&str) -> u64,
 ) -> Vec<Record> {
     let mut out = Vec::new();
 
@@ -205,7 +229,7 @@ pub fn detect_local_changes(
             kind: RecordKind::Host,
             id: block.alias.clone(),
             version: previous.map(|r| r.version + 1).unwrap_or(1),
-            updated_at_ms: next_timestamp(now_ms, previous.map(|r| r.updated_at_ms)),
+            updated_at_ms: next_timestamp(changed_at(&block.alias), previous.map(|r| r.updated_at_ms)),
             device_id: device_id.to_string(),
             deleted: false,
             payload: serde_json::to_value(HostPayload { schema: SCHEMA_VERSION, text: block.text.clone() })
@@ -225,7 +249,7 @@ pub fn detect_local_changes(
             kind: RecordKind::Host,
             id: r.id.clone(),
             version: r.version + 1,
-            updated_at_ms: next_timestamp(now_ms, Some(r.updated_at_ms)),
+            updated_at_ms: next_timestamp(changed_at(&r.id), Some(r.updated_at_ms)),
             device_id: device_id.to_string(),
             deleted: true,
             payload: Value::Null,
@@ -241,13 +265,13 @@ pub fn detect_local_changes(
 - [ ] **Step 4: 執行測試確認通過**
 
 Run: `cd src-tauri && cargo test sync::planner 2>&1 | tail -5`
-Expected: `6 passed`。
+Expected: `7 passed`。
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add src-tauri/src/sync/mod.rs src-tauri/src/sync/planner.rs
-git commit -m "feat(sync): detect local host block changes"
+git commit -m "feat(sync): detect local host block changes with per-block change times"
 ```
 
 ---
@@ -266,7 +290,7 @@ git commit -m "feat(sync): detect local host block changes"
   - `pub struct Merged { pub state: SyncState, pub host_effects: Vec<HostEffect>, pub conflicts: Vec<String>, pub skipped: u32 }`(`state` = 合併後的新狀態,含 `cursor_seq = latestSeq`;**套用成功後**才取代 runtime 的狀態)
   - `pub struct Pushed { pub accepted: usize, pub conflicts: usize }`
   - `pub fn own_device_record(state: &SyncState, now_ms: u64, platform: &str) -> Record`
-  - `pub fn plan_local(state: &mut SyncState, current: &[HostBlockText], changed_at_ms: u64, now_ms: u64, platform: &str) -> usize`(寫入 dirty 記錄與心跳;記錄時間戳用 `changed_at_ms` = 受管檔 mtime,心跳用 `now_ms`;回傳新增/更新的筆數)
+  - `pub fn plan_local(state: &mut SyncState, current: &[HostBlockText], changed_at: impl Fn(&str) -> u64, now_ms: u64, platform: &str) -> usize`(寫入 dirty 記錄與心跳;記錄時間戳用 `changed_at(alias)`,心跳用 `now_ms`;回傳新增/更新的筆數)
   - `pub fn pull_merge(state: &SyncState, keys: &ChainKeys, relay: &dyn Relay) -> Result<Merged, AppError>`(純:不改傳入的 state)
   - `pub fn push_dirty(state: &mut SyncState, keys: &ChainKeys, relay: &dyn Relay) -> Result<Pushed, AppError>`(分批;唯讀模式直接回 0;accepted 只更新該筆 seq/dirty,**不動 cursor**;conflict 只計數)
   - `pub fn encode(keys, record, base_seq) -> Result<PushItem, AppError>`、`pub fn decode(keys, env) -> Result<Record, AppError>`
@@ -368,7 +392,7 @@ mod tests {
     /// 模擬引擎一輪(不碰檔案):plan_local → pull_merge → 採用合併狀態 → push_dirty。
     fn round(state: &mut SyncState, relay: &FakeRelay, blocks: &[HostBlockText], now: u64) -> (Merged, Pushed) {
         let k = keys();
-        plan_local(state, blocks, now, now, "test");
+        plan_local(state, blocks, |_| now, now, "test");
         let merged = pull_merge(state, &k, relay).unwrap();
         *state = merged.state.clone();
         let pushed = push_dirty(state, &k, relay).unwrap();
@@ -444,7 +468,7 @@ mod tests {
         round(&mut a, &relay, &[block("web", "Host web\n")], 100);
         round(&mut b, &relay, &[], 150);
         // B:pull 之後、push 之前,A 又推了新版(時間 400)。
-        plan_local(&mut b, &[block("web", "Host web\n  User b\n")], 300, 300, "test");
+        plan_local(&mut b, &[block("web", "Host web\n  User b\n")], |_| 300, 300, "test");
         let merged = pull_merge(&b, &k, &relay).unwrap();
         b = merged.state;
         round(&mut a, &relay, &[block("web", "Host web\n  User a\n")], 400);
@@ -468,7 +492,7 @@ mod tests {
         let cursor_before = a.cursor_seq;
         round(&mut b, &relay, &[block("x", "Host x\n"), block("y", "Host y\n")], 200);
         // A 推自己的變更:拿到比 B 的記錄更大的 seq,但 cursor 不能跳過 B 的記錄。
-        plan_local(&mut a, &[block("z", "Host z\n")], 300, 300, "test");
+        plan_local(&mut a, &[block("z", "Host z\n")], |_| 300, 300, "test");
         push_dirty(&mut a, &k, &relay).unwrap();
         assert_eq!(a.cursor_seq, cursor_before);
         let (m, _) = round(&mut a, &relay, &[block("z", "Host z\n")], 400);
@@ -548,19 +572,23 @@ mod tests {
     fn invalid_host_text_is_skipped_and_not_cached() {
         let relay = FakeRelay::default();
         let k = keys();
-        // payload 結構正確、但文字不是合法區塊 / alias 不符:合併前就擋掉,不進快取、不產生效果。
+        // payload 結構正確、但文字不是合法區塊 / alias 不符 / 夾帶 Match:合併前就擋掉,不進快取、不產生效果。
         let comment = host_record("web", serde_json::json!({ "schema": 1, "text": "# just a comment\n" }), false);
         let mismatch = host_record("db", serde_json::json!({ "schema": 1, "text": "Host other\n" }), false);
-        relay.push("x", &[encode(&k, &comment, 0).unwrap(), encode(&k, &mismatch, 0).unwrap()]).unwrap();
+        let extra = host_record("app", serde_json::json!({ "schema": 1, "text": "Host app\n  User a\nMatch all\n  User b\n" }), false);
+        relay
+            .push("x", &[encode(&k, &comment, 0).unwrap(), encode(&k, &mismatch, 0).unwrap(), encode(&k, &extra, 0).unwrap()])
+            .unwrap();
         let a = device("a");
         let m = pull_merge(&a, &k, &relay).unwrap();
         assert!(m.host_effects.is_empty());
-        assert_eq!(m.skipped, 2);
+        assert_eq!(m.skipped, 3);
         assert!(!m.state.records.contains_key("host:web"));
         assert!(!m.state.records.contains_key("host:db"));
+        assert!(!m.state.records.contains_key("host:app"));
         // 下一輪的本機 diff 因此不會把它們當成「快取有、檔案沒有」而產生 tombstone。
         let mut s = m.state;
-        assert_eq!(plan_local(&mut s, &[], 100, 100, "test"), 1, "only the device heartbeat");
+        assert_eq!(plan_local(&mut s, &[], |_| 100, 100, "test"), 1, "only the device heartbeat");
     }
 
     #[test]
@@ -707,11 +735,17 @@ pub fn own_device_record(state: &SyncState, now_ms: u64, platform: &str) -> Reco
 }
 
 /// 第一段:本機 diff → dirty 記錄(保留既有 seq 當 base_seq),加上至多每小時一次的裝置心跳。
-/// `changed_at_ms` 是受管檔的 mtime(= 存檔當下),記錄的時間戳用它;心跳才用 `now_ms`。
-/// 呼叫端必須在任何網路操作前把 state 持久化:離線編輯的時間戳因此是編輯當下,重試沿用同一版本。
-pub fn plan_local(state: &mut SyncState, current: &[HostBlockText], changed_at_ms: u64, now_ms: u64, platform: &str) -> usize {
+/// `changed_at(alias)` 是該區塊的修改時間(app 存檔當下或外部編輯的檔案 mtime),記錄的時間戳用它;
+/// 心跳才用 `now_ms`。呼叫端必須在任何網路操作前把 state 持久化:重試沿用同一版本與時間戳。
+pub fn plan_local(
+    state: &mut SyncState,
+    current: &[HostBlockText],
+    changed_at: impl Fn(&str) -> u64,
+    now_ms: u64,
+    platform: &str,
+) -> usize {
     let mut changed = 0;
-    for record in detect_local_changes(&state.records, current, &state.device_id, changed_at_ms) {
+    for record in detect_local_changes(&state.records, current, &state.device_id, changed_at) {
         let key = record_key(record.kind, &record.id);
         let seq = state.records.get(&key).map(|l| l.seq).unwrap_or(0);
         state.records.insert(key, LocalRecord { record, seq, dirty: true });
@@ -761,7 +795,7 @@ pub fn decode(keys: &ChainKeys, env: &Envelope) -> Result<Record, AppError> {
     Ok(record)
 }
 
-/// 遠端 host 記錄 → 效果。tombstone → Delete;文字通過 `validate_host_text`(恰好一個具名 Host 區塊、
+/// 遠端 host 記錄 → 效果。tombstone → Delete;文字通過 `validate_host_text`(只含一個具名 Host 區塊、
 /// alias 相符、無 wildcard)→ Upsert;其他 → None(略過,且不進快取 —— 否則套用失敗的記錄會在
 /// 下一輪被當成「快取有、檔案沒有」而產生 tombstone,把別台的主機刪掉)。
 fn host_effect(record: &Record) -> Option<HostEffect> {
@@ -803,7 +837,7 @@ fn take_remote(state: &mut SyncState, record: Record, seq: u64, acc: &mut Accumu
                         acc.host_effects.push(effect);
                     }
                     None => {
-                        // 格式不支援 / wildcard:不套用、不覆蓋本機快取、絕不當成刪除。
+                        // 格式不支援 / 文字不合法 / wildcard:不套用、不覆蓋本機快取、絕不當成刪除。
                         acc.skipped += 1;
                         return;
                     }
@@ -915,7 +949,7 @@ git commit -m "feat(sync): plan/pull-merge/push round with sealed retention and 
 
 ---
 
-### Task 3: `sync::engine` —— 執行緒、指紋守衛、generation、Tauri commands
+### Task 3: `sync::engine` —— 執行緒、SyncCore、指紋/generation 守衛、逐區塊時間、Tauri commands
 
 **Files:**
 - Create: `src-tauri/src/sync/engine.rs`
@@ -925,27 +959,28 @@ git commit -m "feat(sync): plan/pull-merge/push round with sealed retention and 
 - Modify: `src-tauri/src/lib.rs`(setup 呼叫 `sync::engine::initialize`;註冊 commands)
 
 **Interfaces:**
-- Consumes: A1 全部(含 `RelayClient::validate_url` —— 純驗證、不建 client)、Task 1–2、`crate::keys::ssh_dir()`、`crate::config::commands::{persist_file, load_doc_migrated}`、`crate::config::model::Item`、`crate::fsutil::{Fingerprint, has_changed}`、`crate::tray::{tray_aliases, rebuild_tray}`
+- Consumes: A1 全部(含 `RelayClient::validate_url` —— 純驗證、不建 client)、Task 1–2、`crate::keys::ssh_dir()`、`crate::config::commands::{persist_file, load_doc_migrated}`、`crate::config::parser::parse_file`、`crate::config::model::Item`、`crate::fsutil::{Fingerprint, has_changed}`、`crate::tray::{tray_aliases, rebuild_tray}`
 - Produces(ts-rs 匯出到 `src/bindings/`):
   - `pub struct SyncDevice { pub id: String, pub name: String, pub platform: String, pub joined_at_ms: u64, pub last_seen_ms: u64, pub is_this: bool }`
   - `pub struct SyncStatus { pub joined: bool, pub chain_short: Option<String>, pub device_id: String, pub device_name: String, pub relay_url: String, pub last_sync_ms: Option<u64>, pub last_error: Option<String>, pub pending: u64, pub read_only: bool, pub devices: Vec<SyncDevice>, pub managed_file: String, pub hosts_in_sync: u64, pub phrase_cleanup_pending: bool }`
+  - `pub struct SyncCore { pub generation: u64, pub state: Option<SyncState>, pub keys: Option<ChainKeys> }`、`pub struct SyncRuntime { pub core: Mutex<SyncCore>, … }`、`pub struct BlockTracker`(逐區塊修改時間;`observe`/`changed_at`)
   - commands:`sync_status`、`sync_create_chain(device_name) -> String`(async)、`sync_join_chain(words, device_name) -> SyncStatus`(async)、`sync_show_words() -> String`、`sync_leave_chain(delete_remote: bool) -> SyncStatus`(async;未加入時只重試清 keychain)、`sync_now`、`sync_set_relay_url(url)`、`sync_set_device_name(name)`、`sync_forget_device(device_id)`
   - `pub fn initialize(app: &AppHandle) -> Result<(), AppError>`、`pub fn note_file_written(path: &Path)`、`pub fn wake()`
   - 事件:`sync://status`(payload `SyncStatus`)、`sync://conflict`(payload `Vec<String>` alias)、`sync://applied`(payload `usize`,本輪寫進受管檔的效果數;前端據此讓 config query cache 失效)
-
-> `RelayClient::validate_url(&str) -> Result<String, AppError>` 已由 A1 Task 5 提供(純驗證、回傳正規化 URL);本 task 的 `sync_set_relay_url` 直接用它,不建 HTTP client。
 
 - [ ] **Step 1: 寫失敗的測試(可離線測的部分)**
 
 建立 `src-tauri/src/sync/engine.rs`(先放 `use` 與測試):
 
 ```rust
-//! 同步引擎:背景執行緒 + 一輪的順序(spec §6)+ 把 reconcile 的效果在指紋守衛下套回
-//! in-memory doc / 磁碟 + runtime generation 守衛 + Tauri commands。
+//! 同步引擎:背景執行緒 + 一輪的順序(spec §6)+ `SyncCore`(generation/狀態/金鑰同一把鎖)+ 逐區塊
+//! 修改時間 + 在指紋與 generation 守衛下把 reconcile 的效果套回 in-memory doc / 磁碟 + Tauri commands。
 //! 網路與檔案的邊界:網路只在同步執行緒或 `spawn_blocking` 裡、不持有任何鎖;套用時才短暫鎖 doc。
+//! 鎖順序固定:lifecycle → doc → core。
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -979,25 +1014,29 @@ mod tests {
             HostEffect::Delete { alias: "b".into() },
             HostEffect::Upsert { alias: "c".into(), text: "Host c\n".into() },
         ];
-        let (changed, errors) = apply_effects_to_items(&mut items, &effects);
+        let (changed, failed) = apply_effects_to_items(&mut items, &effects);
         assert!(changed);
-        assert!(errors.is_empty());
+        assert!(failed.is_empty());
         assert_eq!(serialize_items(&items, true), "Host a\n  User y\n\nHost c\n");
         assert_eq!(apply_effects_to_items(&mut items, &[]), (false, Vec::new()));
     }
 
     #[test]
-    fn a_broken_effect_does_not_stop_the_others() {
-        let (mut items, _) = parse_file("Host a\n");
+    fn a_broken_effect_does_not_stop_the_others_and_is_reported_by_alias() {
+        // 本機 `Host web *.internal` 擋住遠端合法的 `Host web`:回報 alias,呼叫端據此不讓它進快取。
+        let (mut items, _) = parse_file("Host a\nHost web *.internal\n  User ops\n");
         let effects = vec![
+            HostEffect::Upsert { alias: "web".into(), text: "Host web\n  User root\n".into() },
             HostEffect::Upsert { alias: "bad".into(), text: "# not a host\n".into() },
             HostEffect::Upsert { alias: "ok".into(), text: "Host ok\n".into() },
         ];
-        let (changed, errors) = apply_effects_to_items(&mut items, &effects);
+        let (changed, failed) = apply_effects_to_items(&mut items, &effects);
         assert!(changed);
-        assert_eq!(errors.len(), 1);
-        assert!(errors[0].starts_with("bad:"));
-        assert!(serialize_items(&items, true).contains("Host ok"));
+        assert_eq!(failed, vec!["web".to_string(), "bad".to_string()]);
+        let text = serialize_items(&items, true);
+        assert!(text.contains("Host ok"));
+        assert!(text.contains("Host web *.internal\n  User ops\n"), "local wildcard block untouched");
+        assert!(!text.contains("User root"));
     }
 
     #[test]
@@ -1032,13 +1071,52 @@ mod tests {
         s.records.insert(record_key(RecordKind::Host, "web"), LocalRecord { record: host, seq: 0, dirty: true });
         let status = status_from(&s, "/tmp/hosts.config");
         assert!(status.joined);
-        assert!(!status.phrase_cleanup_pending);
         assert_eq!(status.chain_short.as_deref(), Some("abababab"));
         assert_eq!(status.pending, 2);
         assert_eq!(status.hosts_in_sync, 1);
         assert_eq!(status.devices.len(), 1);
         assert!(status.devices[0].is_this);
         assert!(status.read_only);
+        assert!(!status.phrase_cleanup_pending);
+    }
+
+    #[test]
+    fn block_tracker_stamps_only_what_changed() {
+        let mut t = BlockTracker::default();
+        let a = HostBlockText { alias: "a".into(), text: "Host a\n".into() };
+        let b = HostBlockText { alias: "b".into(), text: "Host b\n".into() };
+        t.observe(&[a.clone(), b.clone()], 100);
+        assert_eq!(t.changed_at("a"), Some(100));
+        assert_eq!(t.changed_at("b"), Some(100));
+        // 只有 b 變了:a 保留 100,b 變 200。
+        let b2 = HostBlockText { alias: "b".into(), text: "Host b\n  User x\n".into() };
+        t.observe(&[a.clone(), b2], 200);
+        assert_eq!(t.changed_at("a"), Some(100));
+        assert_eq!(t.changed_at("b"), Some(200));
+        // 消失的 alias 也記時間(tombstone 用);沒動的仍不變。
+        t.observe(&[a], 300);
+        assert_eq!(t.changed_at("b"), Some(300));
+        assert_eq!(t.changed_at("a"), Some(100));
+        assert_eq!(t.changed_at("zzz"), None);
+    }
+
+    #[test]
+    fn unapplied_aliases_are_rolled_back_to_the_pre_merge_cache() {
+        let before = SyncState::fresh("A").unwrap();
+        let mut before = before;
+        let old = Record { kind: RecordKind::Host, id: "web".into(), version: 1, updated_at_ms: 1, device_id: "me".into(), deleted: false, payload: serde_json::json!({ "schema": 1, "text": "Host web\n" }) };
+        before.records.insert(record_key(RecordKind::Host, "web"), LocalRecord { record: old.clone(), seq: 1, dirty: false });
+        let mut next = before.clone();
+        let mut newer = old.clone();
+        newer.updated_at_ms = 9;
+        next.records.insert(record_key(RecordKind::Host, "web"), LocalRecord { record: newer, seq: 5, dirty: false });
+        next.records.insert(record_key(RecordKind::Host, "fresh"), LocalRecord { record: Record { id: "fresh".into(), ..old.clone() }, seq: 6, dirty: false });
+        let message = drop_unapplied(&mut next, &before, &["web".to_string(), "fresh".to_string()]);
+        assert!(message.is_some());
+        // web 退回合併前的本機版本;fresh 本機原本沒有 → 移除。下一輪的 diff 因此不會產生 tombstone。
+        assert_eq!(next.records["host:web"].record.updated_at_ms, 1);
+        assert!(!next.records.contains_key("host:fresh"));
+        assert!(drop_unapplied(&mut next, &before, &[]).is_none());
     }
 }
 ```
@@ -1046,7 +1124,7 @@ mod tests {
 - [ ] **Step 2: 執行測試確認失敗**
 
 Run: `cd src-tauri && cargo test sync::engine 2>&1 | tail -5`
-Expected: 編譯錯誤(`apply_effects_to_items`/`status_from` 未定義)。
+Expected: 編譯錯誤(`apply_effects_to_items`/`status_from`/`BlockTracker` 未定義)。
 
 - [ ] **Step 3: 實作 —— 型別、runtime、純函式**
 
@@ -1096,24 +1174,67 @@ pub struct SyncStatus {
     pub phrase_cleanup_pending: bool,
 }
 
+/// generation / 狀態 / 金鑰永遠一起快照、一起替換(spec §6):分開鎖會出現「新 generation + 舊狀態」。
+/// Create/Join/Leave 換 generation 時 +1;只動狀態的命令也 +1(`mutate_state`)。
+pub struct SyncCore {
+    pub generation: u64,
+    pub state: Option<SyncState>,
+    pub keys: Option<ChainKeys>,
+}
+
 /// Tauri 管理的同步執行期狀態。
 pub struct SyncRuntime {
-    pub state: Mutex<Option<SyncState>>,
-    keys: Mutex<Option<ChainKeys>>,
-    /// Create/Join/Leave(doc 鎖內)、改 relay URL、改裝置名、Forget device 都 +1;在途的同步輪次據此作廢(spec §6)。
-    generation: AtomicU64,
+    pub core: Mutex<SyncCore>,
+    /// Create/Join/Leave 全程互斥(含前置檢查、網路等待、keychain 讀寫;都在 spawn_blocking 裡):
+    /// 舊 Leave 不可能刪掉新 Join 剛存的助記詞,兩個 Join 也不可能同時通過檢查。順序:lifecycle → doc → core。
+    lifecycle: Mutex<()>,
     syncing: AtomicBool,
 }
 
 impl Default for SyncRuntime {
     fn default() -> Self {
         Self {
-            state: Mutex::new(None),
-            keys: Mutex::new(None),
-            generation: AtomicU64::new(0),
+            core: Mutex::new(SyncCore { generation: 0, state: None, keys: None }),
+            lifecycle: Mutex::new(()),
             syncing: AtomicBool::new(false),
         }
     }
+}
+
+/// 逐區塊的修改時間(spec §6):app 存檔時(`note_file_written`)用存檔當下;外部編輯在 gather 時用檔案
+/// mtime(近似)。純資料、可測試;放全域是因為 `persist_file` 只有路徑、沒有 AppHandle。
+#[derive(Default)]
+pub struct BlockTracker {
+    snapshot: BTreeMap<String, String>,
+    changed_at: BTreeMap<String, u64>,
+}
+
+impl BlockTracker {
+    /// 觀察目前的區塊:文字變了 / 新出現 / 消失的 alias 記為 `stamp_ms`;沒變的保留原時間。
+    pub fn observe(&mut self, blocks: &[HostBlockText], stamp_ms: u64) {
+        let current: BTreeMap<String, String> = blocks.iter().map(|b| (b.alias.clone(), b.text.clone())).collect();
+        for (alias, text) in &current {
+            if self.snapshot.get(alias) != Some(text) {
+                self.changed_at.insert(alias.clone(), stamp_ms);
+            }
+        }
+        for alias in self.snapshot.keys() {
+            if !current.contains_key(alias) {
+                self.changed_at.insert(alias.clone(), stamp_ms);
+            }
+        }
+        self.snapshot = current;
+    }
+
+    pub fn changed_at(&self, alias: &str) -> Option<u64> {
+        self.changed_at.get(alias).copied()
+    }
+}
+
+static TRACKER: OnceLock<Mutex<BlockTracker>> = OnceLock::new();
+
+fn tracker() -> &'static Mutex<BlockTracker> {
+    TRACKER.get_or_init(|| Mutex::new(BlockTracker::default()))
 }
 
 /// 喚醒背景執行緒的通道;由 `persist_file` 與 commands 共用,故放全域。
@@ -1127,27 +1248,32 @@ pub fn wake() {
     }
 }
 
-/// `persist_file` 寫完任何檔案後呼叫:只有受管同步檔才會觸發同步。
-pub fn note_file_written(path: &Path) {
-    if let Ok(ssh_dir) = crate::keys::ssh_dir() {
-        if path == hosts_file::managed_path(&ssh_dir) {
-            wake();
-        }
-    }
-}
-
 fn now_ms() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
+}
+
+/// `persist_file` 寫完任何檔案後呼叫:只有受管同步檔才會觸發。存檔當下就逐區塊記下修改時間 ——
+/// 呼叫端(config commands)正持有 doc 鎖,這裡不能再鎖 doc,所以直接讀剛寫好的檔案。
+pub fn note_file_written(path: &Path) {
+    let Ok(ssh_dir) = crate::keys::ssh_dir() else { return };
+    if path != hosts_file::managed_path(&ssh_dir) {
+        return;
+    }
+    if let Ok(text) = std::fs::read_to_string(path) {
+        let (items, _) = crate::config::parser::parse_file(&text);
+        tracker().lock().unwrap().observe(&hosts_file::blocks_of(&items), now_ms());
+    }
+    wake();
 }
 
 fn superseded() -> AppError {
     AppError::Other(SUPERSEDED.to_string())
 }
 
-/// 把 reconcile 的效果套到區塊列表。回傳(是否改了任何東西, 套不上的效果訊息);壞掉的效果不中斷其他效果。
+/// 把 reconcile 的效果套到區塊列表。回傳(是否改了任何東西, 套不上的 alias);壞掉的效果不中斷其他效果。
 pub fn apply_effects_to_items(items: &mut Vec<Item>, effects: &[HostEffect]) -> (bool, Vec<String>) {
     let mut changed = false;
-    let mut errors = Vec::new();
+    let mut failed = Vec::new();
     for effect in effects {
         let result = match effect {
             HostEffect::Upsert { alias, text } => hosts_file::apply_host_text(items, alias, text),
@@ -1155,10 +1281,34 @@ pub fn apply_effects_to_items(items: &mut Vec<Item>, effects: &[HostEffect]) -> 
         };
         match result {
             Ok(c) => changed |= c,
-            Err(e) => errors.push(format!("{}: {e}", effect.alias())),
+            Err(_) => failed.push(effect.alias().to_string()),
         }
     }
-    (changed, errors)
+    (changed, failed)
+}
+
+/// 套不上的 alias 不得進快取(spec §6):記錄退回合併前的本機版本(本機原本沒有就移除)。
+/// 否則下一輪 diff 會把它當成「快取有、檔案沒有」而產生 tombstone,把別台的主機刪掉。回傳要放進
+/// `last_error` 的訊息(只有數量,不含主機名)。
+fn drop_unapplied(next: &mut SyncState, before: &SyncState, failed: &[String]) -> Option<String> {
+    if failed.is_empty() {
+        return None;
+    }
+    for alias in failed {
+        let key = record_key(RecordKind::Host, alias);
+        match before.records.get(&key) {
+            Some(previous) => {
+                next.records.insert(key, previous.clone());
+            }
+            None => {
+                next.records.remove(&key);
+            }
+        }
+    }
+    Some(format!(
+        "{} synced host(s) could not be applied: a local block with the same name contains wildcard patterns",
+        failed.len()
+    ))
 }
 
 pub fn status_from(state: &SyncState, managed_file: &str) -> SyncStatus {
@@ -1199,7 +1349,7 @@ pub fn status_from(state: &SyncState, managed_file: &str) -> SyncStatus {
 - [ ] **Step 4: 執行測試確認通過**
 
 Run: `cd src-tauri && cargo test sync::engine 2>&1 | tail -5`
-Expected: `4 passed`。
+Expected: `6 passed`。
 
 - [ ] **Step 5: 實作 —— 啟動、執行緒、一輪的順序與檔案邊界**
 
@@ -1229,7 +1379,7 @@ fn ensure_managed_loaded(app: &AppHandle) -> Result<PathBuf, AppError> {
     Ok(managed)
 }
 
-/// gather 的結果:區塊 + 當時的檔案指紋(套用前要再比一次)+ 檔案 mtime(本機變更的時間戳)。
+/// gather 的結果:區塊 + 當時的檔案指紋(套用前要再比一次)+ 檔案 mtime(外部編輯的時間戳)。
 struct Gathered {
     blocks: Vec<HostBlockText>,
     fingerprint: Fingerprint,
@@ -1252,29 +1402,28 @@ fn gather_blocks(app: &AppHandle, managed: &Path) -> Result<Gathered, AppError> 
     }
     let doc = doc_lock.as_ref().expect("just loaded");
     let idx = doc.files.iter().position(|f| f.path == managed).ok_or_else(|| AppError::Other("synced hosts file vanished".to_string()))?;
-    // 本機變更的時間戳 = 檔案 mtime(存檔當下,UI 存檔與外部編輯皆然),不是同步執行緒掃到的時間;拿不到就退回現在。
+    // 外部編輯的時間戳 = 檔案 mtime(整檔的近似值);拿不到就退回現在。
     let modified_ms = std::fs::metadata(managed)
         .and_then(|m| m.modified())
         .ok()
         .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
         .map(|d| d.as_millis() as u64)
         .unwrap_or_else(now_ms);
-    Ok(Gathered {
-        blocks: hosts_file::blocks_of(&doc.files[idx].items),
-        fingerprint: doc.files[idx].fingerprint.clone(),
-        modified_ms,
-    })
+    let blocks = hosts_file::blocks_of(&doc.files[idx].items);
+    // app 自己存檔的區塊已在 note_file_written 記過時間、文字沒變就保留;只有外部編輯改到的區塊會拿到 mtime。
+    tracker().lock().unwrap().observe(&blocks, modified_ms);
+    Ok(Gathered { blocks, fingerprint: doc.files[idx].fingerprint.clone(), modified_ms })
 }
 
 enum Applied {
-    /// 套用完成;true = 真的寫了檔案。
-    Done(bool),
+    /// 套用完成;`wrote` = 真的寫了檔案;`failed` = 套不上的 alias,呼叫端不得讓它們進快取。
+    Done { wrote: bool, failed: Vec<String> },
     /// 受管檔在 gather 之後變過(UI 存檔、外部編輯或 persist 的 Conflict):本輪作廢。
     FileChanged,
 }
 
 /// 在指紋與 generation 守衛下把效果寫進受管檔(經 `persist_file`)。效果先套到 items 的副本;
-/// 持久化失敗時還原 in-memory 區塊,不留下與磁碟不一致的 doc。
+/// 持久化失敗時先退回舊區塊、再從磁碟重載,不留下與磁碟不一致的 doc。
 fn apply_effects(
     app: &AppHandle,
     managed: &Path,
@@ -1283,12 +1432,12 @@ fn apply_effects(
     effects: &[HostEffect],
 ) -> Result<Applied, AppError> {
     if effects.is_empty() {
-        return Ok(Applied::Done(false));
+        return Ok(Applied::Done { wrote: false, failed: Vec::new() });
     }
     let state = app.state::<AppState>();
     let mut doc_lock = state.doc.lock().unwrap();
-    // lifecycle 命令在 doc 鎖內換 generation:拿到鎖後再比,舊 keys 的合併結果就不可能被寫進檔案。
-    if state.sync.generation.load(Ordering::SeqCst) != generation {
+    // lifecycle 命令在 doc 鎖內換 generation/狀態/金鑰:拿到 doc 鎖後再比,舊 keys 的合併結果就不可能被寫進檔案。
+    if state.sync.core.lock().unwrap().generation != generation {
         return Err(superseded());
     }
     let mut backed_up = state.backed_up.lock().unwrap();
@@ -1306,73 +1455,75 @@ fn apply_effects(
         return Ok(Applied::FileChanged);
     }
     let mut items = doc.files[idx].items.clone();
-    let (changed, errors) = apply_effects_to_items(&mut items, effects);
-    if !errors.is_empty() {
-        // 只印數量,不印內容(記錄文字可能含使用者資料)。
-        eprintln!("[sync] {} remote host record(s) could not be applied", errors.len());
+    let (changed, failed) = apply_effects_to_items(&mut items, effects);
+    if !failed.is_empty() {
+        // 只印數量,不印內容。
+        eprintln!("[sync] {} remote host record(s) could not be applied to the local file", failed.len());
     }
     if !changed {
-        return Ok(Applied::Done(false));
+        return Ok(Applied::Done { wrote: false, failed });
     }
     let original = std::mem::replace(&mut doc.files[idx].items, items);
-    match persist_file(doc, idx, &mut backed_up, retention) {
-        Ok(()) => {}
-        Err(AppError::Conflict(_)) => {
-            // 磁碟在指紋檢查與寫入之間又變了:重載到與磁碟一致,本輪作廢。
-            let main_path = doc.files[0].path.clone();
-            *doc_lock = Some(load_doc_migrated(&main_path)?);
-            return Ok(Applied::FileChanged);
+    if let Err(e) = persist_file(doc, idx, &mut backed_up, retention) {
+        // 任何失敗:先把 in-memory 區塊退回舊版,再從磁碟重載讓兩邊一致 —— 磁碟可能已是新內容
+        // (atomic_write 成功但 fingerprint 失敗),也可能仍是舊內容。重載也失敗就只保留舊區塊並回報。
+        doc.files[idx].items = original;
+        let main_path = doc.files[0].path.clone();
+        if let Err(reload) = load_doc_migrated(&main_path).map(|fresh| *doc_lock = Some(fresh)) {
+            return Err(AppError::Other(format!("{e}; reloading the config afterwards also failed: {reload}")));
         }
-        Err(e) => {
-            // 備份或原子寫入失敗:磁碟還是舊內容,in-memory 也退回舊區塊(指紋未動,仍與磁碟一致)。
-            doc.files[idx].items = original;
-            return Err(e);
-        }
+        return match e {
+            AppError::Conflict(_) => Ok(Applied::FileChanged),
+            other => Err(other),
+        };
     }
     let aliases = crate::tray::tray_aliases(doc);
     let _ = crate::tray::rebuild_tray(app, &aliases);
-    Ok(Applied::Done(true))
+    Ok(Applied::Done { wrote: true, failed })
 }
 
-fn emit_status(app: &AppHandle) {
-    let state = app.state::<AppState>();
-    let guard = state.sync.state.lock().unwrap();
-    if let Some(s) = guard.as_ref() {
-        let managed = managed_path().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
-        let status = status_from(s, &managed);
-        let _ = app.emit("sync://status", &status);
-    }
-}
-
-fn save_state(app: &AppHandle) -> Result<(), AppError> {
-    let state = app.state::<AppState>();
-    let guard = state.sync.state.lock().unwrap();
-    if let Some(s) = guard.as_ref() {
+/// 持久化 core 裡的狀態(呼叫端已持有 core 鎖)。
+fn persist_core(core: &SyncCore) -> Result<(), AppError> {
+    if let Some(s) = core.state.as_ref() {
         sync_state::save(&sync_state::state_path()?, s)?;
     }
     Ok(())
 }
 
-/// 同步輪次回寫狀態的唯一入口:generation 變了(Leave/Join/改 URL 搶先)就丟棄,絕不覆蓋。
-fn commit_state(app: &AppHandle, generation: u64, s: &SyncState) -> Result<(), AppError> {
+fn save_state(app: &AppHandle) -> Result<(), AppError> {
     let state = app.state::<AppState>();
-    let mut guard = state.sync.state.lock().unwrap();
-    if state.sync.generation.load(Ordering::SeqCst) != generation {
-        return Err(superseded());
-    }
-    *guard = Some(s.clone());
-    sync_state::save(&sync_state::state_path()?, s)
+    let core = state.sync.core.lock().unwrap();
+    persist_core(&core)
 }
 
-/// 一輪(spec §6 的順序)。回 `SUPERSEDED` 表示被 lifecycle 命令搶先,不是錯誤。
+fn emit_status(app: &AppHandle) {
+    let state = app.state::<AppState>();
+    let core = state.sync.core.lock().unwrap();
+    if let Some(s) = core.state.as_ref() {
+        let managed = managed_path().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
+        let _ = app.emit("sync://status", &status_from(s, &managed));
+    }
+}
+
+/// 同步輪次回寫狀態的唯一入口:generation 變了(lifecycle 或狀態命令搶先)就丟棄,絕不覆蓋。
+fn commit_state(app: &AppHandle, generation: u64, s: &SyncState) -> Result<(), AppError> {
+    let state = app.state::<AppState>();
+    let mut core = state.sync.core.lock().unwrap();
+    if core.generation != generation {
+        return Err(superseded());
+    }
+    core.state = Some(s.clone());
+    persist_core(&core)
+}
+
+/// 一輪(spec §6 的順序)。回 `SUPERSEDED` 表示被 lifecycle / 狀態命令搶先,不是錯誤。
 fn run_round(app: &AppHandle) -> Result<(), AppError> {
     let state = app.state::<AppState>();
-    let generation = state.sync.generation.load(Ordering::SeqCst);
-    let (mut s, keys) = {
-        let guard = state.sync.state.lock().unwrap();
-        let k = state.sync.keys.lock().unwrap();
-        match (guard.as_ref(), k.as_ref()) {
-            (Some(s), Some(k)) if s.joined() => (s.clone(), k.clone()),
+    // generation / 狀態 / 金鑰一次快照(同一把鎖):不可能拿到「新 generation + 舊狀態」。
+    let (generation, mut s, keys) = {
+        let core = state.sync.core.lock().unwrap();
+        match (core.state.as_ref(), core.keys.as_ref()) {
+            (Some(s), Some(k)) if s.joined() => (core.generation, s.clone(), k.clone()),
             _ => return Ok(()),
         }
     };
@@ -1382,32 +1533,38 @@ fn run_round(app: &AppHandle) -> Result<(), AppError> {
     let platform = std::env::consts::OS;
     let relay = RelayClient::new(&s.relay_url, &keys.auth_token)?;
 
-    // 0. 基線輪(剛 Create/Join):不做本機 diff,先以 chain 為準套用 —— chain 上已 tombstone、本機
-    //    同步檔卻還留著的區塊會被移除(先備份)。否則 Leave 後保留的舊區塊會以「現在」的時間戳復活
-    //    遠端的刪除。成功後立刻再跑一輪,本機獨有的區塊才當新主機上傳。
+    // 0. 基線輪(剛 Join):不做本機 diff,先以 chain 為準套用 —— chain 上已 tombstone、本機同步檔卻還
+    //    留著的區塊會被移除(先備份)。否則 Leave 後保留的舊區塊會以「現在」的時間戳復活遠端的刪除。
+    //    成功後立刻再跑一輪,本機獨有的區塊才當新主機上傳。
     if !s.baseline_established {
         let merged = reconcile::pull_merge(&s, &keys, &relay)?;
-        match apply_effects(app, &managed, generation, &gathered.fingerprint, &merged.host_effects)? {
+        return match apply_effects(app, &managed, generation, &gathered.fingerprint, &merged.host_effects)? {
             Applied::FileChanged => {
                 wake();
-                return Ok(());
+                Ok(())
             }
-            Applied::Done(wrote) => {
-                s = merged.state;
-                s.baseline_established = true;
-                s.last_sync_ms = Some(now);
-                commit_state(app, generation, &s)?;
+            Applied::Done { wrote, failed } => {
+                let mut next = merged.state;
+                next.last_error = drop_unapplied(&mut next, &s, &failed);
+                next.baseline_established = true;
+                next.last_sync_ms = Some(now);
+                commit_state(app, generation, &next)?;
                 if wrote {
                     let _ = app.emit("sync://applied", &merged.host_effects.len());
                 }
                 wake();
-                return Ok(());
+                Ok(())
             }
-        }
+        };
     }
 
-    // 1. 本機變更先持久化(離線也如此:時間戳 = 檔案 mtime,重試沿用同一版本)。
-    if reconcile::plan_local(&mut s, &gathered.blocks, gathered.modified_ms.min(now), now, platform) > 0 {
+    // 1. 本機變更(逐區塊時間:app 存檔當下 / 外部編輯的 mtime)先持久化。
+    let changed = {
+        let times = tracker().lock().unwrap();
+        let fallback = gathered.modified_ms.min(now);
+        reconcile::plan_local(&mut s, &gathered.blocks, |alias| times.changed_at(alias).unwrap_or(fallback), now, platform)
+    };
+    if changed > 0 {
         commit_state(app, generation, &s)?;
     }
 
@@ -1415,13 +1572,14 @@ fn run_round(app: &AppHandle) -> Result<(), AppError> {
     let merged = reconcile::pull_merge(&s, &keys, &relay)?;
 
     // 3. 套用:受管檔若在網路期間變了,整輪 pull/merge 丟棄(cursor 不前進),立刻再跑一輪。
-    match apply_effects(app, &managed, generation, &gathered.fingerprint, &merged.host_effects)? {
+    let unapplied = match apply_effects(app, &managed, generation, &gathered.fingerprint, &merged.host_effects)? {
         Applied::FileChanged => {
             wake();
             return Ok(());
         }
-        Applied::Done(wrote) => {
-            s = merged.state;
+        Applied::Done { wrote, failed } => {
+            let before = std::mem::replace(&mut s, merged.state);
+            let message = drop_unapplied(&mut s, &before, &failed);
             commit_state(app, generation, &s)?;
             if wrote {
                 let _ = app.emit("sync://applied", &merged.host_effects.len());
@@ -1429,14 +1587,15 @@ fn run_round(app: &AppHandle) -> Result<(), AppError> {
             if !merged.conflicts.is_empty() {
                 let _ = app.emit("sync://conflict", &merged.conflicts);
             }
+            message
         }
-    }
+    };
 
     // 4. 推送(唯讀模式內部略過)。部分成功也要持久化,所以先 commit 再看結果。
     let pushed = reconcile::push_dirty(&mut s, &keys, &relay);
     s.last_sync_ms = Some(now);
     if pushed.is_ok() {
-        s.last_error = s.read_only().then(|| READ_ONLY_MESSAGE.to_string());
+        s.last_error = if s.read_only() { Some(READ_ONLY_MESSAGE.to_string()) } else { unapplied };
     }
     commit_state(app, generation, &s)?;
     if pushed?.conflicts > 0 {
@@ -1445,7 +1604,7 @@ fn run_round(app: &AppHandle) -> Result<(), AppError> {
     Ok(())
 }
 
-/// 一輪同步。錯誤寫進 last_error 並發事件,永不 panic;被 lifecycle 搶先(SUPERSEDED)不算錯誤。
+/// 一輪同步。錯誤寫進 last_error 並發事件,永不 panic;被搶先(SUPERSEDED)不算錯誤。
 pub fn sync_once(app: &AppHandle) -> Result<(), AppError> {
     let state = app.state::<AppState>();
     if state.sync.syncing.swap(true, Ordering::SeqCst) {
@@ -1456,10 +1615,11 @@ pub fn sync_once(app: &AppHandle) -> Result<(), AppError> {
     match &result {
         Err(AppError::Other(m)) if m == SUPERSEDED => {}
         Err(e) => {
-            if let Some(s) = state.sync.state.lock().unwrap().as_mut() {
+            let mut core = state.sync.core.lock().unwrap();
+            if let Some(s) = core.state.as_mut() {
                 s.last_error = Some(e.to_string());
             }
-            let _ = save_state(app);
+            let _ = persist_core(&core);
         }
         Ok(()) => {}
     }
@@ -1481,7 +1641,7 @@ fn worker_loop(app: AppHandle, rx: Receiver<()>) {
 /// 啟動:載入狀態與助記詞,派生金鑰,開背景執行緒。狀態損毀不阻擋 app 啟動。
 pub fn initialize(app: &AppHandle) -> Result<(), AppError> {
     let state = app.state::<AppState>();
-    let loaded = match sync_state::state_path().and_then(|p| sync_state::load(&p)) {
+    let mut loaded = match sync_state::state_path().and_then(|p| sync_state::load(&p)) {
         Ok(Some(s)) => s,
         Ok(None) => SyncState::fresh(&default_device_name())?,
         Err(e) => {
@@ -1490,14 +1650,18 @@ pub fn initialize(app: &AppHandle) -> Result<(), AppError> {
             s
         }
     };
-    let mut loaded = loaded;
+    let mut keys = None;
     if loaded.joined() {
         match sync_state::load_mnemonic() {
-            Ok(Some(words)) => *state.sync.keys.lock().unwrap() = crypto::derive_keys(&words).ok(),
+            Ok(Some(words)) => keys = crypto::derive_keys(&words).ok(),
             _ => loaded.last_error = Some("recovery phrase is missing from the keychain; leave and rejoin the chain".to_string()),
         }
     }
-    *state.sync.state.lock().unwrap() = Some(loaded);
+    {
+        let mut core = state.sync.core.lock().unwrap();
+        core.state = Some(loaded);
+        core.keys = keys;
+    }
     let (tx, rx) = mpsc::channel();
     *WAKER.get_or_init(|| Mutex::new(None)).lock().unwrap() = Some(tx);
     let handle = app.clone();
@@ -1527,9 +1691,23 @@ fn default_device_name() -> String {
 ```rust
 fn with_state<T>(app: &AppHandle, f: impl FnOnce(&mut SyncState) -> Result<T, AppError>) -> Result<T, AppError> {
     let state = app.state::<AppState>();
-    let mut guard = state.sync.state.lock().unwrap();
-    let s = guard.as_mut().ok_or_else(|| AppError::Other("sync is not initialized".to_string()))?;
+    let mut core = state.sync.core.lock().unwrap();
+    let s = core.state.as_mut().ok_or_else(|| AppError::Other("sync is not initialized".to_string()))?;
     f(s)
+}
+
+/// 只動狀態的命令:在同一個臨界區「換 generation + 改狀態 + 持久化」。在途輪次的整份狀態副本
+/// 會因 generation 不同而被丟棄,不會蓋掉這裡的修改。
+fn mutate_state<T>(app: &AppHandle, f: impl FnOnce(&mut SyncState) -> Result<T, AppError>) -> Result<T, AppError> {
+    let state = app.state::<AppState>();
+    let mut core = state.sync.core.lock().unwrap();
+    core.generation += 1;
+    let out = {
+        let s = core.state.as_mut().ok_or_else(|| AppError::Other("sync is not initialized".to_string()))?;
+        f(s)?
+    };
+    persist_core(&core)?;
+    Ok(out)
 }
 
 fn current_status(app: &AppHandle) -> Result<SyncStatus, AppError> {
@@ -1548,8 +1726,8 @@ enum ChainEntry {
     Join,
 }
 
-/// 建立或加入 chain 的共同流程(在 spawn_blocking 裡跑):驗證/建立 → 存助記詞 → 換 generation →
-/// 寫狀態、種下 device(+ meta)記錄 → 準備受管檔 → 喚醒。
+/// 建立或加入 chain 的共同流程。**呼叫端已持有 lifecycle 鎖**(全程,含網路與 keychain)。
+/// 驗證/建立 → 存助記詞 → 在 doc 鎖內、同一個 core 臨界區換 generation/狀態/金鑰 → 準備受管檔 → 喚醒。
 fn enter_chain(app: &AppHandle, words: &str, device_name: &str, mode: ChainEntry) -> Result<SyncStatus, AppError> {
     let keys = crypto::derive_keys(words)?;
     let relay_url = with_state(app, |s| Ok(s.relay_url.clone()))?;
@@ -1571,10 +1749,13 @@ fn enter_chain(app: &AppHandle, words: &str, device_name: &str, mode: ChainEntry
     sync_state::store_mnemonic(words)?;
     let now = now_ms();
     let state = app.state::<AppState>();
-    // 在 doc 鎖內換 generation 與狀態:與 apply_effects 的寫檔互斥,在途的舊輪次不可能再用舊 keys 寫檔。
-    let doc_guard = state.doc.lock().unwrap();
-    state.sync.generation.fetch_add(1, Ordering::SeqCst);
-    with_state(app, |s| {
+    {
+        // doc 鎖:與 apply_effects 的寫檔互斥;core 鎖:generation/狀態/金鑰一次換掉,不會有「新 generation +
+        // 舊狀態」的交錯(spec §6)。
+        let _doc = state.doc.lock().unwrap();
+        let mut core = state.sync.core.lock().unwrap();
+        core.generation += 1;
+        let s = core.state.as_mut().ok_or_else(|| AppError::Other("sync is not initialized".to_string()))?;
         s.chain_id = Some(keys.chain_id.clone());
         s.device_name = device_name.trim().to_string();
         s.cursor_seq = 0;
@@ -1604,40 +1785,40 @@ fn enter_chain(app: &AppHandle, words: &str, device_name: &str, mode: ChainEntry
             };
             s.records.insert(record_key(RecordKind::Meta, "chain"), LocalRecord { record: meta, seq: 0, dirty: true });
         }
-        Ok(())
-    })?;
-    *state.sync.keys.lock().unwrap() = Some(keys);
-    drop(doc_guard); // ensure_managed_loaded 會自己拿 doc 鎖
+        core.keys = Some(keys);
+        persist_core(&core)?;
+    }
     ensure_managed_loaded(app)?;
-    save_state(app)?;
     wake();
     current_status(app)
 }
 
-/// 離開 chain(在 spawn_blocking 裡跑)。先作廢在途輪次並清掉 chain 狀態(確保停止同步),再刪
-/// keychain;keychain 刪不掉要回報並留下重試旗標,不得宣稱已清乾淨。未加入時只做 keychain 重試。
+/// 離開 chain。**呼叫端已持有 lifecycle 鎖**。先作廢在途輪次並清掉 chain 狀態(確保停止同步),再刪
+/// keychain;keychain 刪不掉要回報並持久化重試旗標,不得宣稱已清乾淨。未加入時只做 keychain 重試。
 fn leave_chain(app: &AppHandle, delete_remote: bool) -> Result<SyncStatus, AppError> {
     let state = app.state::<AppState>();
-    if with_state(app, |s| Ok(s.joined()))? {
+    let (joined, chain, keys, relay_url) = {
+        let core = state.sync.core.lock().unwrap();
+        let s = core.state.as_ref();
+        (
+            s.is_some_and(|s| s.joined()),
+            s.and_then(|s| s.chain_id.clone()),
+            core.keys.clone(),
+            s.map(|s| s.relay_url.clone()).unwrap_or_default(),
+        )
+    };
+    if joined {
         if delete_remote {
-            let (chain, keys, relay_url) = {
-                let s = state.sync.state.lock().unwrap();
-                let k = state.sync.keys.lock().unwrap();
-                (
-                    s.as_ref().and_then(|s| s.chain_id.clone()),
-                    k.clone(),
-                    s.as_ref().map(|s| s.relay_url.clone()).unwrap_or_default(),
-                )
-            };
             if let (Some(chain), Some(keys)) = (chain, keys) {
                 RelayClient::new(&relay_url, &keys.auth_token)?.delete_chain(&chain)?;
             }
         }
-        // 在 doc 鎖內換 generation 並清狀態:在途的舊輪次不可能再寫檔、也不可能把已離開的 chain 放回來。
-        let doc_guard = state.doc.lock().unwrap();
-        state.sync.generation.fetch_add(1, Ordering::SeqCst);
-        *state.sync.keys.lock().unwrap() = None;
-        with_state(app, |s| {
+        // doc 鎖內、同一個 core 臨界區:在途的舊輪次不可能再寫檔、也不可能把已離開的 chain 放回來。
+        let _doc = state.doc.lock().unwrap();
+        let mut core = state.sync.core.lock().unwrap();
+        core.generation += 1;
+        core.keys = None;
+        if let Some(s) = core.state.as_mut() {
             s.chain_id = None;
             s.cursor_seq = 0;
             s.records.clear();
@@ -1646,12 +1827,10 @@ fn leave_chain(app: &AppHandle, delete_remote: bool) -> Result<SyncStatus, AppEr
             s.baseline_established = false;
             s.last_sync_ms = None;
             s.last_error = None;
-            Ok(())
-        })?;
-        save_state(app)?;
-        drop(doc_guard);
+        }
+        persist_core(&core)?;
     }
-    // keychain 清理結果持久化到狀態檔:重啟後警示與重試入口仍在(spec §6)。
+    // keychain 清理(仍在 lifecycle 鎖內:新 Join 不可能穿插)。結果持久化,重啟後警示與重試入口仍在。
     let cleared = sync_state::clear_mnemonic();
     with_state(app, |s| {
         s.phrase_cleanup_pending = cleared.is_err();
@@ -1672,30 +1851,38 @@ pub fn sync_status(app: AppHandle) -> Result<SyncStatus, AppError> {
     current_status(&app)
 }
 
-/// 網路在 spawn_blocking 裡:`reqwest::blocking` 不能在 tokio runtime 內呼叫。
+/// 網路在 spawn_blocking 裡(`reqwest::blocking` 不能在 tokio runtime 內呼叫);lifecycle 鎖涵蓋前置檢查。
 #[tauri::command]
 pub async fn sync_create_chain(app: AppHandle, device_name: String) -> Result<String, AppError> {
-    if with_state(&app, |s| Ok(s.joined()))? {
-        return Err(AppError::Other("already in a sync chain; leave it first".to_string()));
-    }
-    let words = crypto::generate_mnemonic()?;
-    let (handle, phrase) = (app.clone(), words.clone());
-    tauri::async_runtime::spawn_blocking(move || enter_chain(&handle, &phrase, &device_name, ChainEntry::Create))
-        .await
-        .map_err(join_error)??;
-    Ok(words)
+    let handle = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = handle.state::<AppState>();
+        let _lifecycle = state.sync.lifecycle.lock().unwrap();
+        if with_state(&handle, |s| Ok(s.joined()))? {
+            return Err(AppError::Other("already in a sync chain; leave it first".to_string()));
+        }
+        let words = crypto::generate_mnemonic()?;
+        enter_chain(&handle, &words, &device_name, ChainEntry::Create)?;
+        Ok(words)
+    })
+    .await
+    .map_err(join_error)?
 }
 
 #[tauri::command]
 pub async fn sync_join_chain(app: AppHandle, words: String, device_name: String) -> Result<SyncStatus, AppError> {
-    if with_state(&app, |s| Ok(s.joined()))? {
-        return Err(AppError::Other("already in a sync chain; leave it first".to_string()));
-    }
     let normalized = crypto::normalize_mnemonic(&words)?;
     let handle = app.clone();
-    tauri::async_runtime::spawn_blocking(move || enter_chain(&handle, &normalized, &device_name, ChainEntry::Join))
-        .await
-        .map_err(join_error)?
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = handle.state::<AppState>();
+        let _lifecycle = state.sync.lifecycle.lock().unwrap();
+        if with_state(&handle, |s| Ok(s.joined()))? {
+            return Err(AppError::Other("already in a sync chain; leave it first".to_string()));
+        }
+        enter_chain(&handle, &normalized, &device_name, ChainEntry::Join)
+    })
+    .await
+    .map_err(join_error)?
 }
 
 #[tauri::command]
@@ -1709,9 +1896,13 @@ pub fn sync_show_words(app: AppHandle) -> Result<String, AppError> {
 #[tauri::command]
 pub async fn sync_leave_chain(app: AppHandle, delete_remote: bool) -> Result<SyncStatus, AppError> {
     let handle = app.clone();
-    tauri::async_runtime::spawn_blocking(move || leave_chain(&handle, delete_remote))
-        .await
-        .map_err(join_error)?
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = handle.state::<AppState>();
+        let _lifecycle = state.sync.lifecycle.lock().unwrap();
+        leave_chain(&handle, delete_remote)
+    })
+    .await
+    .map_err(join_error)?
 }
 
 #[tauri::command]
@@ -1724,14 +1915,11 @@ pub fn sync_now(app: AppHandle) -> Result<(), AppError> {
 #[tauri::command]
 pub fn sync_set_relay_url(app: AppHandle, url: String) -> Result<SyncStatus, AppError> {
     let normalized = RelayClient::validate_url(&url)?; // 純驗證,不建 client
-    let state = app.state::<AppState>();
-    state.sync.generation.fetch_add(1, Ordering::SeqCst); // 在途輪次用的是舊 URL:作廢
-    with_state(&app, |s| {
+    mutate_state(&app, |s| {
         s.relay_url = normalized;
         s.last_error = None;
         Ok(())
     })?;
-    save_state(&app)?;
     wake();
     current_status(&app)
 }
@@ -1743,9 +1931,7 @@ pub fn sync_set_device_name(app: AppHandle, name: String) -> Result<SyncStatus, 
         return Err(AppError::Other("device name cannot be empty".to_string()));
     }
     let now = now_ms();
-    // 先換 generation 再改狀態:在途輪次的整份狀態副本不得蓋掉這裡的修改。
-    app.state::<AppState>().sync.generation.fetch_add(1, Ordering::SeqCst);
-    with_state(&app, |s| {
+    mutate_state(&app, |s| {
         s.device_name = name;
         if s.joined() {
             let me = reconcile::own_device_record(s, now, std::env::consts::OS);
@@ -1755,7 +1941,6 @@ pub fn sync_set_device_name(app: AppHandle, name: String) -> Result<SyncStatus, 
         }
         Ok(())
     })?;
-    save_state(&app)?;
     wake();
     current_status(&app)
 }
@@ -1765,9 +1950,7 @@ pub fn sync_set_device_name(app: AppHandle, name: String) -> Result<SyncStatus, 
 #[tauri::command]
 pub fn sync_forget_device(app: AppHandle, device_id: String) -> Result<SyncStatus, AppError> {
     let now = now_ms();
-    // 先換 generation 再改狀態:在途輪次的整份狀態副本不得蓋掉這裡的 tombstone。
-    app.state::<AppState>().sync.generation.fetch_add(1, Ordering::SeqCst);
-    with_state(&app, |s| {
+    mutate_state(&app, |s| {
         if device_id == s.device_id {
             return Err(AppError::Other("use Leave chain to remove this device".to_string()));
         }
@@ -1783,7 +1966,6 @@ pub fn sync_forget_device(app: AppHandle, device_id: String) -> Result<SyncStatu
         s.records.insert(key, LocalRecord { record, seq: local.seq, dirty: true });
         Ok(())
     })?;
-    save_state(&app)?;
     wake();
     current_status(&app)
 }
@@ -1809,15 +1991,16 @@ pnpm tauri dev                 # 另一個終端
 在 devtools console 執行:
 - `await window.__TAURI__.core.invoke("sync_create_chain", { deviceName: "dev" })` → 回 24 詞(不得 panic —— 這條路徑驗證 spawn_blocking 包住了 blocking reqwest);`invoke("sync_status")` → `joined: true`、`devices` 含本機;`~/.ssh/config` **第一個非註解行**是 `Include ~/.ssh/sshelter/hosts.config`。
 - 把任一 host 用既有 Move 搬進 `hosts.config` 後幾秒內 `pending` 歸零。
-- 基線輪:Leave(不刪 relay)→ 用另一個 OS 使用者/裝置刪掉一台同步主機 → 本機 Join 回來 → 那台主機從本機 `hosts.config` 消失(備份在 backups 目錄),本機獨有的主機則在下一輪上傳。
 - `invoke("sync_leave_chain", { deleteRemote: false })` 後,用另一組**合法但不同**的 24 詞 `invoke("sync_join_chain", …)` → 錯誤訊息含 "no sync chain matches",且 relay 的 `.wrangler/state` 沒有多出 chain。
 - 同步期間(關掉 relay 讓 pull 卡在 timeout)在 UI 改一台同步主機並存檔 → relay 回來後那筆修改仍在(本輪被 FileChanged 丟棄後重跑)。
+- 基線輪:Leave(不刪 relay)→ 用另一個 OS 使用者/裝置刪掉一台同步主機 → 本機 Join 回來 → 那台主機從本機 `hosts.config` 消失(備份在 backups 目錄),本機獨有的主機則在下一輪上傳。
+- 並行 lifecycle:快速連按兩次 Join(devtools 同時 `invoke` 兩次)→ 只有一個成功,另一個回 "already in a sync chain";Leave 後立刻 Join → 重啟 app 後 `sync_show_words` 仍能回同一組詞(舊 Leave 沒有刪掉新 Join 的助記詞)。
 
 - [ ] **Step 9: Commit**
 
 ```bash
 git add src-tauri/src/sync/mod.rs src-tauri/src/sync/engine.rs src-tauri/src/state.rs src-tauri/src/config/commands.rs src-tauri/src/lib.rs src/bindings/SyncStatus.ts src/bindings/SyncDevice.ts
-git commit -m "feat(sync): background engine with fingerprint and generation guards, chain lifecycle commands"
+git commit -m "feat(sync): background engine with atomic core snapshots, lifecycle mutex and per-block change times"
 ```
 
 ---
@@ -1831,10 +2014,10 @@ git commit -m "feat(sync): background engine with fingerprint and generation gua
 - Modify: `src-tauri/src/lib.rs`(註冊 `sync_migrate_hosts`、`sync_duplicate_aliases`、`sync_resolve_shadowed`)
 
 **Interfaces:**
-- Consumes: `crate::config::commands::{move_host, persist_file, validate_host_patterns}`、`crate::config::edit::{find_host_mut, set_tags, set_host_patterns}`、`crate::config::dto::parse_tags`、`crate::config::include::find_host_file_index`
+- Consumes: `crate::config::commands::{move_host, persist_file, validate_host_patterns}`、`crate::config::edit::{find_host_mut, set_tags, set_host_patterns}`、`crate::config::dto::parse_tags`、`crate::config::include::find_host_file_index`、`crate::sync::hosts_file::is_syncable_block`
 - Produces:
   - `pub fn tag_for_file(path: &Path) -> String`
-  - `pub fn refuse_wildcard(doc: &SshConfigDoc, alias: &str) -> Result<(), AppError>`(遷入前:區塊任一 pattern 含 wildcard → Err;與 `hosts_file::is_syncable_block` 同一條規則)
+  - `pub fn refuse_wildcard(doc: &SshConfigDoc, alias: &str) -> Result<(), AppError>`(遷入前:以**與 `move_host` 相同的定位規則**找到會被搬的區塊,任一 pattern 含 wildcard → Err)
   - `pub fn duplicate_aliases(doc: &SshConfigDoc, managed: &Path) -> Vec<DuplicateAlias>`
   - `pub struct DuplicateAlias { pub alias: String, pub local_file: String }`(ts-rs)
   - `pub enum ShadowedAction { Rename, Remove }`(serde 小寫:`"rename" | "remove"`)
@@ -1847,8 +2030,8 @@ git commit -m "feat(sync): background engine with fingerprint and generation gua
 建立 `src-tauri/src/sync/migrate.rs`:
 
 ```rust
-//! 既有主機遷入受管同步檔(spec §10):批次 move + 以原檔名上 tag;加入 chain 後「同步檔遮蔽本地
-//! 同名主機」的偵測;以及**以檔案路徑定位**的處理(既有 `config_rename_host`/`config_remove_host`
+//! 既有主機遷入受管同步檔(spec §10):批次 move + 以原檔名上 tag;加入 chain 後「同步檔與本地同名
+//! 主機」的偵測;以及**以檔案路徑定位**的處理(既有 `config_rename_host`/`config_remove_host`
 //! 以第一個命中為準,會依 Include 順序誤中同步檔那份,不能用)。
 
 use std::path::Path;
@@ -1859,9 +2042,11 @@ use tauri::{AppHandle, Manager};
 use crate::config::commands::{move_host, persist_file, validate_host_patterns};
 use crate::config::dto::parse_tags;
 use crate::config::edit::{find_host_mut, set_host_patterns, set_tags};
+use crate::config::include::find_host_file_index;
 use crate::config::model::{Item, SshConfigDoc};
 use crate::error::AppError;
 use crate::state::AppState;
+use crate::sync::hosts_file::is_syncable_block;
 
 #[cfg(test)]
 mod tests {
@@ -1897,12 +2082,15 @@ mod tests {
     }
 
     #[test]
-    fn migration_refuses_blocks_with_wildcard_patterns() {
+    fn migration_refuses_the_block_move_host_would_actually_pick() {
         let dir = tempfile::tempdir().unwrap();
         let main = dir.path().join("config");
-        std::fs::write(&main, "Host web *.internal\n  User ops\nHost db\n").unwrap();
+        // `move_host` 挑的是「任一 pattern 相符」的第一個區塊:遷移 `web` 會搬到含 wildcard 的第一個,不是
+        // 後面那個乾淨的 `Host web`。資格檢查必須用同一條定位規則。
+        std::fs::write(&main, "Host other web *.internal\n  User ops\nHost web\nHost db\n").unwrap();
         let doc = load_doc(&main).unwrap();
         assert!(refuse_wildcard(&doc, "web").is_err());
+        assert!(refuse_wildcard(&doc, "other").is_err());
         assert!(refuse_wildcard(&doc, "db").is_ok());
         assert!(refuse_wildcard(&doc, "ghost").is_ok(), "move_host reports unknown aliases itself");
     }
@@ -2015,13 +2203,17 @@ fn first_alias(item: &Item) -> Option<&str> {
     }
 }
 
-/// 遷入前的資格檢查:區塊的所有 pattern 都必須具名(與 `hosts_file::is_syncable_block` 同一條規則,
-/// 後端也要擋,不能只靠前端清單)。找不到 alias 交給 `move_host` 回報。
+/// 遷入前的資格檢查,用**與 `move_host` 相同的定位規則**(`find_host_file_index` → 該檔案裡「任一 pattern
+/// 相符」的第一個區塊):那個區塊的所有 pattern 都必須具名。找不到 alias 交給 `move_host` 回報。
 pub fn refuse_wildcard(doc: &SshConfigDoc, alias: &str) -> Result<(), AppError> {
-    let block = doc.files.iter().flat_map(|f| f.items.iter()).find(|i| first_alias(i) == Some(alias));
+    let Some(idx) = find_host_file_index(doc, alias) else { return Ok(()) };
+    let block = doc.files[idx]
+        .items
+        .iter()
+        .find(|i| matches!(i, Item::Host(h) if h.patterns.iter().any(|p| p == alias)));
     match block {
-        Some(Item::Host(h)) if !crate::sync::hosts_file::is_syncable_block(&h.patterns) => Err(AppError::Other(format!(
-            "host '{alias}' has wildcard patterns and cannot be synced"
+        Some(Item::Host(h)) if !is_syncable_block(&h.patterns) => Err(AppError::Other(format!(
+            "host '{alias}' belongs to a block with wildcard patterns and cannot be synced"
         ))),
         _ => Ok(()),
     }
@@ -2136,8 +2328,7 @@ pub fn sync_migrate_hosts(app: AppHandle, aliases: Vec<String>, tag_by_file: boo
             report.failed.push(MigrationFailure { alias, error: e.to_string() });
             continue;
         }
-        let source_tag = crate::config::include::find_host_file_index(doc, &alias)
-            .map(|i| tag_for_file(&doc.files[i].path));
+        let source_tag = find_host_file_index(doc, &alias).map(|i| tag_for_file(&doc.files[i].path));
         match move_host(doc, &alias, &managed_str) {
             Ok((src, tgt)) => {
                 if let Err(e) = persist_file(doc, tgt, &mut backed_up, retention)
@@ -2178,7 +2369,7 @@ pub fn sync_migrate_hosts(app: AppHandle, aliases: Vec<String>, tag_by_file: boo
 - [ ] **Step 4: 執行測試確認通過**
 
 Run: `cd src-tauri && cargo test 2>&1 | grep 'test result' && ls ../src/bindings/ | grep -iE 'Migration|Duplicate'`
-Expected: 全綠;`MigrationReport.ts`、`MigrationFailure.ts`、`DuplicateAlias.ts` 生成。
+Expected: 全綠(`sync::migrate` 4 個);`MigrationReport.ts`、`MigrationFailure.ts`、`DuplicateAlias.ts` 生成。
 
 - [ ] **Step 5: Commit**
 
@@ -2191,8 +2382,8 @@ git commit -m "feat(sync): migrate hosts into the synced file, detect and resolv
 
 ## Self-review(已執行)
 
-- **Spec 覆蓋**:§6 一輪的順序(gather 指紋 → plan_local 持久化 → pull_merge → 指紋守衛套用 → push 分批 → 事件)→ Task 2 + Task 3;cursor 只隨 pull(Task 2 測試);generation 守衛(Task 3 `commit_state`);sealed 保留與唯讀持久化(Task 2 測試);Upsert/Delete/略過三態(Task 2 測試);Create 用 PUT、Join 用 GET(Task 3 `enter_chain`);Leave 的 keychain 失敗回報(Task 3 `leave_chain` + `phrase_cleanup_pending`);網路只在 std thread / spawn_blocking(Task 3);§10 遷入 wizard 的主機/tag 部分與檔案定位的 shadowed 處理(Task 4);`sync://applied` 事件與 tray 重建(Task 3 `apply_effects`)。
-- **型別一致**:`HostEffect`/`Merged`/`Pushed` 由 Task 2 定義、Task 3 使用;`Envelope` 來自 A1 `record.rs`;`SyncState.sealed`/`remote_schema_version`/`read_only()` 來自 A1 Task 4;`RelayClient::validate_url` 在 Task 3 Step 0 加進 A1 的 relay.rs;`status_from(state, managed_file, phrase_cleanup_pending)` 與測試一致;A4 的 hooks 對應 commands:`sync_status`、`sync_create_chain`、`sync_join_chain`、`sync_show_words`、`sync_leave_chain`、`sync_now`、`sync_set_relay_url`、`sync_set_device_name`、`sync_forget_device`、`sync_migrate_hosts`、`sync_duplicate_aliases`、`sync_resolve_shadowed`。
-- **Review Focus 對應**:1 → Task 1 `timestamps_never_go_backwards` + `unchanged_block…bumps_version`;2 → Task 2 `undecryptable_envelopes_are_skipped_not_fatal`;3 → Task 2 `concurrent_edit_is_resolved…`;4 → Task 2 `cursor_only_follows_the_pull_watermark`;5 → Task 2 `push_conflict_is_deferred_to_the_next_round`;6 → Task 2 `unparseable_host_payload_is_skipped_not_deleted`;7 → Task 3 `apply_effects`(指紋雙重比對 + Conflict → FileChanged;手動 smoke 第 4 項);8 → Task 2 `pushes_are_batched_by_count`。
-- **Codex review(2026-09-27)已納入**:cursor 漏記錄(5)、唯讀只維持一輪與未知記錄未保留(6)、格式不支援當成刪除(7)、離線 dirty 未持久化(8)、網路期間本機編輯被覆寫(9)、整份 state 回寫覆蓋 Leave(10)、Join 用 PUT(21)、E0502(22)、未分批(23)、Leave 吞掉 keychain 錯誤(24)、blocking reqwest 在 tauri async command 裡(版本限制段)、shadowed alias 操作以第一個命中定位(12)、`sync://applied`(25)。
-- **Codex 第二輪已納入**:generation 在 doc 鎖內換、`apply_effects` 寫檔前比對、只動狀態的命令也 +1(H3);基線輪防止重新加入復活遠端刪除(H4);合併前 `validate_host_text`、不合格不進快取(H5、7);時間戳取檔案 mtime(M9、8);持久化失敗還原 in-memory 區塊(M8);`phrase_cleanup_pending` 持久化(M10、24);遷入拒絕含 wildcard 的區塊(M3);`ChainEntry` 加 `Copy`(避免 `match mode` 後再用的 use-after-move)。
+- **Spec 覆蓋**:§6 基線輪(Join;Create 直接 true)、一輪的順序(gather 指紋與 mtime → plan_local 逐區塊時間並持久化 → pull_merge → 指紋/generation 守衛套用、套不上的不進快取 → push 分批 → 事件)→ Task 2 + Task 3;cursor 只隨 pull(Task 2 測試);`SyncCore` 同一把鎖的原子快照與 lifecycle 互斥(Task 3);sealed 保留與唯讀持久化(Task 2 測試);Upsert/Delete/略過三態(Task 2 測試,含夾帶 Match 的文字);Create 用 PUT、Join 用 GET(Task 3 `enter_chain`);Leave 的 keychain 失敗回報與持久化旗標(Task 3 `leave_chain`);網路只在 std thread / spawn_blocking(Task 3);§10 遷入 wizard 的主機/tag 部分、遷入拒絕 wildcard 區塊(與 `move_host` 同一定位規則)、檔案定位的 shadowed 處理(Task 4);`sync://applied` 事件與 tray 重建(Task 3 `apply_effects`)。
+- **型別一致**:`HostEffect`/`Merged`/`Pushed` 由 Task 2 定義、Task 3 使用;`plan_local(state, current, changed_at, now_ms, platform)` 與 `detect_local_changes(…, changed_at)` 的閉包簽章一致;`Envelope` 來自 A1 `record.rs`;`SyncState.sealed`/`remote_schema_version`/`baseline_established`/`phrase_cleanup_pending`/`read_only()` 來自 A1 Task 4;`RelayClient::validate_url` 來自 A1 Task 5;`status_from(state, managed_file)` 兩個參數,`phrase_cleanup_pending` 從狀態讀;A4 的 hooks 對應 commands:`sync_status`、`sync_create_chain`、`sync_join_chain`、`sync_show_words`、`sync_leave_chain`、`sync_now`、`sync_set_relay_url`、`sync_set_device_name`、`sync_forget_device`、`sync_migrate_hosts`、`sync_duplicate_aliases`、`sync_resolve_shadowed`。
+- **鎖順序**:lifecycle → doc → core。`enter_chain`/`leave_chain` 在 lifecycle 內先做網路(不持其他鎖),再 doc → core;`apply_effects` doc → core(只短暫讀 generation);`commit_state`/`mutate_state`/`with_state`/`emit_status` 只鎖 core;`gather_blocks`/`ensure_managed_loaded`/`sync_migrate_hosts` 只鎖 doc;`note_file_written` 在呼叫端持有 doc 鎖時只鎖 TRACKER(獨立的全域鎖,不與其他鎖巢狀)。沒有任何路徑以相反順序取鎖。
+- **Review Focus 對應**:1 → Task 1 `timestamps_never_go_backwards` + `unchanged_block…bumps_version`;2 → Task 2 `undecryptable_envelopes_are_skipped_not_fatal`;3 → Task 2 `concurrent_edit_is_resolved…`;4 → Task 2 `cursor_only_follows_the_pull_watermark`;5 → Task 2 `push_conflict_is_deferred_to_the_next_round`;6 → Task 2 `unparseable_host_payload_is_skipped_not_deleted`;7 → Task 3 `apply_effects`(指紋雙重比對 + Conflict → FileChanged;手動 smoke);8 → Task 2 `pushes_are_batched_by_count`;9 → Task 2 `invalid_host_text_is_skipped_and_not_cached`;10 → Task 3 基線分支(手動 smoke);11 → Task 1 `each_changed_block_carries_its_own_change_time` + Task 3 `block_tracker_stamps_only_what_changed`;12 → Task 3 `a_broken_effect…is_reported_by_alias` + `unapplied_aliases_are_rolled_back…`。
+- **Codex review 三輪已納入**:cursor(5)、唯讀持久化與 sealed(6)、格式不支援不當成刪除(7)、離線 dirty 先持久化(8)、網路期間本機編輯(9)、Leave 覆蓋(10)、Join 用 GET(21)、E0502(22)、分批(23)、keychain 錯誤回報與持久化(24、M10)、blocking reqwest 進 spawn_blocking、shadowed 檔案定位(12)、`sync://applied`(25);第二輪:generation 守衛(H3)、基線輪(H4)、合併前驗證(H5)、mtime(M9)、持久化失敗還原(M8)、遷入拒絕 wildcard(M3);第三輪:`SyncCore` 原子快照(R3-H1)、lifecycle 鎖(R3-H2)、套不上的 alias 不進快取(R3-H3、7、H5)、`refuse_wildcard` 與 `move_host` 同一定位規則(R3-H4、17、M3)、持久化失敗先退回再重載(R3-M4)、逐區塊修改時間(R3-M5、8、M9)、Create 基線例外與 `status_from` 參數的文字同步(R3-L1)。

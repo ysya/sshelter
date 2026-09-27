@@ -15,7 +15,7 @@
 - 中繼**永不**記錄或回傳 token 明文;只存 `SHA-256(token)` hex。
 - 認證失敗與 chain 不存在一律 `404`(不洩露 chain 是否存在);**讀取不存在的 chain 不得建立 schema 或寫入任何儲存**。
 - `nonce`/`ciphertext` 必須是嚴格的標準 base64(ASCII、非空、長度為 4 的倍數、`={0,2}` padding),否則 `400`;配額以字元數計(ASCII 才能讓 JS `.length` 與 SQLite `LENGTH()` 一致)。
-- 上限(spec §5):單筆 `ciphertext` ≤ 65536 字元;每 chain 儲存總量 = 所有列(**含 tombstone**)的 `LENGTH(ciphertext) + LENGTH(nonce)` 總和 ≤ 1 MiB、記錄數 ≤ 4096(超過 → 整批 `413`,不部分寫入);request body ≤ 1 MiB(串流讀取、超過即取消 → `413`);每次 push 1–200 筆;每 chain 每分鐘 ≤ 120 次請求(`429`);每 IP 每小時 ≤ 20 次建鏈、≤ 1200 次任何請求(`429`);閒置 180 天自動清除,成功授權的 pull 也刷新期限(每 instance 6 小時最多一次)。
+- 上限(spec §5):單筆 `ciphertext` ≤ 65536 字元;每 chain 儲存總量 = 所有列(**含 tombstone**)的 `LENGTH(ciphertext) + LENGTH(nonce)` 總和 ≤ 1 MiB、記錄數 ≤ 4096(超過 → 整批 `413`,不部分寫入);request body ≤ 1 MiB(串流讀取、超過即取消 → `413`);每次 push 1–200 筆;每 chain 每分鐘 ≤ 120 次請求(所有端點都計,含建鏈那一次;已授權但超限一律 `429`);每 IP 每小時 ≤ 20 次建鏈請求(`PUT` 嘗試,不論結果)、≤ 1200 次任何請求(`429`);閒置 180 天自動清除,成功授權的 pull 也刷新期限(每 instance 6 小時最多一次)。
 - 配額以「判定接受之後」的用量計算:conflict 的項目不佔配額;被取代的舊列先扣掉再加新列。
 - `DELETE` 之後同一個 DO instance 必須能再次建立(`deleteAll()` 連 table 一起清,`PUT` 重建 schema)。
 - wire 格式 camelCase JSON,與 A1 `record.rs`/`relay.rs` 對齊:`idHash`、`kind`、`seq`、`nonce`、`ciphertext`、`deleted`、`baseSeq`、`latestSeq`、`results[].status = "ok" | "conflict"`。
@@ -54,7 +54,7 @@
 
 **Interfaces:**
 - Produces(HTTP,皆需 `Authorization: Bearer <64 hex>`):
-  - `PUT /v1/chains/:chainId` → `201 {}`(新建)/ `200 {}`(已存在且 token 相符)/ `404`(token 不符)/ `429`(此 IP 一小時內已建 20 條或已送 1200 次請求)
+  - `PUT /v1/chains/:chainId` → `201 {}`(新建)/ `200 {}`(已存在且 token 相符)/ `404`(token 不符)/ `429`(此 IP 一小時內已送 20 次建鏈請求或 1200 次任何請求;或此 chain 一分鐘內已 120 次)
   - `POST /v1/chains/:chainId/records` body `PushItem[]`(1–200 筆)→ `200 { results: ({status:"ok",seq}|{status:"conflict",current:Envelope})[], latestSeq }`;`400` 格式錯;`413` 單筆/配額/body 過大;`429` 速率
   - `GET /v1/chains/:chainId/records?since=N` → `200 { records: Envelope[], latestSeq }`
   - `DELETE /v1/chains/:chainId` → `204`
@@ -308,7 +308,8 @@ describe("records", () => {
     expect(all.records).toHaveLength(1);
     expect(all.records[0].deleted).toBe(true);
     expect(all.records[0].ciphertext).toBe("dG9tYg==");
-    // 15 筆 64 KiB 把配額吃到 983,160 bytes;再來一筆 64 KiB 的 tombstone 一樣越界。
+    // 既有的 tombstone 佔 8 + 8 = 16 bytes;15 筆 64 KiB 把用量吃到 16 + 983,160 = 983,176;
+    // 再來一筆 64 KiB 的 tombstone → 1,048,720 > 1 MiB,一樣越界。
     const big = "y".repeat(65_536);
     const fifteen = Array.from({ length: 15 }, (_, i) => item(hid(100 + i), 0, big));
     expect((await push(fifteen)).status).toBe(200);
@@ -384,12 +385,16 @@ describe("records", () => {
     expect((await push(Array.from({ length: 100 }, (_, i) => item(hid(5000 + i), 0, SMALL)))).status).toBe(413);
   });
 
-  it("rate-limits a chain to 120 requests per minute", async () => {
-    await create(); // 第 1 次
+  it("rate-limits a chain to 120 requests per minute on every endpoint", async () => {
+    await create(); // 第 1 次(建鏈那一次也計數)
     for (let i = 0; i < 119; i++) {
       expect((await pull(0)).status).toBe(200);
     }
+    // 第 121 次起,已授權的任何端點一律 429(不是 404、不是靜默成功)。
     expect((await pull(0)).status).toBe(429);
+    expect((await create()).status).toBe(429);
+    expect((await push([item(hid(1))])).status).toBe(429);
+    expect((await destroy()).status).toBe(429);
   });
 });
 ```
@@ -418,7 +423,8 @@ function create(id: string) {
   );
 }
 
-it("allows 20 chain creations per IP per hour, then answers 429", async () => {
+// 建鏈桶計的是 PUT 嘗試(不論 201/200/404),不是成功建立的 chain 數(spec §5)。
+it("allows 20 chain-creation requests per IP per hour, then answers 429", async () => {
   const first = newChainId();
   expect((await create(first)).status).toBe(201);
   for (let i = 1; i < 20; i++) {
@@ -587,18 +593,19 @@ export class ChainStore extends DurableObject<Env> {
     await this.ctx.storage.setAlarm(now + IDLE_TTL_MS);
   }
 
-  /** 201 新建、200 已存在、404 token 不符。建鏈的每 IP 限制在 Worker 層。 */
-  async create(tokenHash: string): Promise<201 | 200 | 404> {
+  /** 201 新建、200 已存在、404 token 不符、429 超過每 chain 速率。建鏈的每 IP 限制在 Worker 層。 */
+  async create(tokenHash: string): Promise<201 | 200 | 404 | 429> {
     if (!this.hasSchema()) {
       this.ctx.storage.sql.exec(SCHEMA);
       this.setMeta("token_hash", tokenHash);
       this.setMeta("latest_seq", "0");
       this.setMeta("created_at", String(Date.now()));
+      this.rateLimited(); // 建鏈那一次也算進每 chain 的請求數(第 1 次,不可能超限)
       await this.touch(true);
       return 201;
     }
     if (this.meta("token_hash") !== tokenHash) return 404;
-    if (this.rateLimited()) return 404;
+    if (this.rateLimited()) return 429;
     await this.touch(true);
     return 200;
   }
@@ -670,8 +677,9 @@ export class ChainStore extends DurableObject<Env> {
     return { status: 200, body: { results: plan.map((p) => p.result), latestSeq: latest } };
   }
 
-  async destroy(tokenHash: string): Promise<204 | 404> {
+  async destroy(tokenHash: string): Promise<204 | 404 | 429> {
     if (!this.authorized(tokenHash)) return 404;
+    if (this.rateLimited()) return 429;
     // compatibility_date ≥ 2026-02-24:deleteAll() 連 alarm 一起刪;schema 也沒了,下次 PUT 重建。
     await this.ctx.storage.deleteAll();
     this.lastTouch = 0;
@@ -794,7 +802,9 @@ export default {
 
     if (isCreate) {
       const code = await stub.create(tokenHash);
-      return code === 404 ? notFound() : Response.json({}, { status: code });
+      if (code === 404) return notFound();
+      if (code === 429) return status(429);
+      return Response.json({}, { status: code });
     }
     if (!recordsPath && request.method === "DELETE") {
       return status(await stub.destroy(tokenHash));
@@ -865,7 +875,7 @@ Then point SSHelter at your Worker URL: Settings → Sync → Relay URL. The app
 ## Limits
 
 - 64 KiB per record, 1 MiB and 4096 records per chain (tombstones count), 1 MiB per request
-- 120 requests/min per chain; per IP: 20 chain creations/hour, 1200 requests/hour
+- 120 requests/min per chain (any endpoint); per IP: 20 chain-creation requests/hour, 1200 requests/hour
 - chains idle for 180 days are deleted automatically (reads count as activity; devices keep their local copies)
 - reading a chain that was never created returns 404 and allocates nothing
 
@@ -961,4 +971,5 @@ gh variable set SSHELTER_RELAY_URL --repo ysya/sshelter --body "https://sshelter
 - **測試數字**:15 × (65,536 + 8) = 983,160 ≤ 1,048,576;16 × 65,544 = 1,048,704 > 1,048,576;`SMALL`(4)+ nonce(8)= 12;4000 × 12 = 48,000;`"z".repeat(65_540)` 是 4 的倍數(通過 base64 驗證)且 > 65,536 → 413。
 - **Review Focus 對應**:1 → `reports a conflict when baseSeq is stale`;2 → `validates bodies…`(since=abc/-1)與 `assigns increasing seqs…`(since=99);3 → `validates bodies…`(含非 base64、NUL、非 ASCII、重複 idHash、201 筆);4 → `hides the chain from a different token…`;5 → `refuses oversize records…`、`charges replacements net of the old row…`、`keeps tombstones…`;6 → `deletes everything and lets the same instance be created again`;7 → `does not allocate storage for chains that were never created`;8 → `ip-limit.test.ts`;9 → `refuses oversize records, oversize bodies…`(string 與 stream body)。
 - **Codex review(2026-09-27,兩輪)已納入**:配額在判定接受之後計算、tombstone 與 nonce 計入、記錄數上限、body 大小串流上限、每 IP 建鏈與總請求限制(finding 4、H1、M6);`deleteAll()` 後 schema 重建與讀不存在的 chain 不建 schema(18、H1);嚴格 base64 讓 JS/SQLite 長度一致(H2);pull 刷新 TTL(M7);fixture 改成合法 hex/base64(19);測試型別改用官方 `@cloudflare/vitest-plugin/types` 與 `wrangler types`(20);測試數量 13 + 2(L1)。
+- **Codex 第三輪已納入**:建鏈那一次也計入每 chain 速率、已授權超限一律 429(含 PUT/DELETE)(R3-M2);建鏈桶明確定義為「PUT 嘗試次數」並同步 spec/README/測試用語(R3-M3);tombstone 配額測試註解補上既有 16 bytes(R3-L2);`duplex: "half"` 在 workerd 會被忽略,串流 body 測試不依賴它(只是為了 Node 型別/相容而保留)。
 - **未採用 Workers Rate Limiting binding 的原因**:它的 `period` 只能是 10 或 60 秒、per-colo 且 best-effort,官方文件與 Miniflare README 都沒有說明本機/測試支援;DO 計數器可精確表達「每小時 N 次」且能在 vitest 裡驗證。

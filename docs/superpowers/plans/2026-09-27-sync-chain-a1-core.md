@@ -795,7 +795,13 @@ mod tests {
         assert!(validate_host_text("bad", "# just a comment\n").is_err());
         assert!(validate_host_text("mismatch", "Host other\n").is_err());
         assert!(validate_host_text("two", "Host two\nHost three\n").is_err());
+        // 夾帶 Match / 全域指令 / 區塊外註解:套用後只剩 Host,與快取不一致 → 拒絕。
+        assert!(validate_host_text("web", "Host web\n  User a\nMatch all\n  User b\n").is_err());
+        assert!(validate_host_text("web", "# leading comment\nHost web\n").is_err());
+        assert!(validate_host_text("web", "AddKeysToAgent yes\nHost web\n").is_err());
         assert!(validate_host_text("new", "Host new\n  User root\n").is_ok());
+        // 區塊內的註解與尾隨空行屬於區塊本身,可以。
+        assert!(validate_host_text("new", "Host new\n  # inside\n  User root\n\n").is_ok());
     }
 
     #[test]
@@ -949,15 +955,21 @@ pub fn blocks_of(items: &[Item]) -> Vec<HostBlockText> {
         .collect()
 }
 
+/// 文字必須「只」含一個 Host 區塊:夾帶 Match、全域指令或區塊外註解都拒絕 —— 否則套用後檔案裡只剩
+/// Host,快取卻是完整文字,下一輪會把截斷結果當成本機修改重新上傳。
 fn parse_single_host(alias: &str, text: &str) -> Result<Item, AppError> {
     let (parsed, _) = parse_file(text);
-    let mut hosts = parsed.into_iter().filter(|i| matches!(i, Item::Host(_)));
-    let host = hosts
-        .next()
-        .ok_or_else(|| AppError::Other(format!("synced record for '{alias}' has no Host block")))?;
-    if hosts.next().is_some() {
-        return Err(AppError::Other(format!("synced record for '{alias}' has more than one Host block")));
+    let mut hosts = Vec::new();
+    for item in parsed {
+        match item {
+            Item::Host(_) => hosts.push(item),
+            _ => return Err(AppError::Other(format!("synced record for '{alias}' must contain nothing but one Host block"))),
+        }
     }
+    if hosts.len() != 1 {
+        return Err(AppError::Other(format!("synced record for '{alias}' must contain exactly one Host block")));
+    }
+    let host = hosts.remove(0);
     match &host {
         Item::Host(h) if h.patterns.first().map(String::as_str) != Some(alias) => {
             Err(AppError::Other(format!("synced record for '{alias}' names a different host")))
@@ -1046,7 +1058,7 @@ git commit -m "feat(sync): managed hosts file block operations"
   - `pub const STATE_VERSION: u32 = 1;`
   - `pub const DEFAULT_RELAY_URL: &str`(= `option_env!("SSHELTER_RELAY_URL")` 或 `"http://127.0.0.1:8787"`)
   - `pub struct SyncState { pub version: u32, pub chain_id: Option<String>, pub device_id: String, pub device_name: String, pub relay_url: String, pub cursor_seq: u64, pub password_sync: bool, pub remote_schema_version: Option<u32>, pub baseline_established: bool, pub phrase_cleanup_pending: bool, pub records: BTreeMap<String, LocalRecord>, pub sealed: BTreeMap<String, Envelope>, pub last_sync_ms: Option<u64>, pub last_error: Option<String> }`
-    - `baseline_established`:剛 Create/Join 後為 false,A3 的基線輪成功後設 true(spec §6);`phrase_cleanup_pending`:Leave 時 keychain 刪不掉 → true(持久化,重啟後仍顯示重試)。
+    - `baseline_established`:剛 Join 後為 false,A3 的基線輪成功後設 true(Create 的 chain 是空的,直接 true;spec §6);`phrase_cleanup_pending`:Leave 時 keychain 刪不掉 → true(持久化,重啟後仍顯示重試)。
     - `records`:只放本版會處理的種類(host/device/meta)的明文快取;`sealed`(key = `"{kind}:{id_hash}"`):本版不處理的種類(key/password/未知)的原始密文 envelope,絕不解密。
   - `impl SyncState { pub fn fresh(device_name: &str) -> Result<Self, AppError>; pub fn joined(&self) -> bool; pub fn read_only(&self) -> bool }`(`read_only` = `remote_schema_version > SCHEMA_VERSION`)
   - `pub fn state_path() -> Result<PathBuf, AppError>`
@@ -1214,7 +1226,7 @@ pub struct SyncState {
     /// chain 的 `meta.schema_version`(收到後持久化);比 `SCHEMA_VERSION` 新 → 唯讀模式。
     #[serde(default)]
     pub remote_schema_version: Option<u32>,
-    /// 剛 Create/Join 後 false:第一輪是「以 chain 為準」的基線輪,不做本機 diff(spec §6)。
+    /// 剛 Join 後 false:第一輪是「以 chain 為準」的基線輪,不做本機 diff(spec §6);Create 的 chain 是空的,直接 true。
     #[serde(default)]
     pub baseline_established: bool,
     /// Leave 時 keychain 裡的助記詞刪不掉:持久化這個待辦,重啟後仍顯示警示與重試。
@@ -1700,3 +1712,4 @@ git commit -m "feat(sync): relay HTTP client with conflict-aware push"
 - **型別一致**:`Envelope` 定義在 Task 2(`record.rs`),Task 4 的 `sealed` 與 Task 5 的 client(`pub use`)共用;`PushItem` 欄位名與 A2 Worker 的 wire 格式(camelCase)一致;`LocalRecord.seq` 對應 `PushItem.base_seq`;`record_key` 作為 `SyncState.records` 的 key。
 - **Review Focus 對應**:1 → Task 1 `normalize_accepts_messy_input_and_rejects_bad_words`;2 → Task 3 `blocks_of_…skips_the_rest`、`apply_replaces_one_block…` 與 `wildcard_blocks_are_neither_extracted_nor_touched`;3 → Task 5 `unreachable_relay_fails_fast`;4 → Task 5 `server_errors_and_garbage_bodies…`;5 → Task 4 `corrupt_or_newer_state…`;6 → Task 5 `rejects_plain_http_except_loopback`;7 → Task 3 `ensure_include_goes_to_the_very_top_and_is_idempotent`。
 - **Codex review(2026-09-27)已納入**:HMAC trait 歧義(finding 15)、AAD/協定 byte-level 定義與向量(16)、wildcard 政策(17)、http relay URL(3)、祕密不進狀態檔(2,`sealed`)、Include 置頂(13)、`secrets::delete` 行為(24)、reqwest 版本與 lockfile 對齊。
+- **第二、三輪已納入**:E0716(M2)、整個區塊的 wildcard 規則 `is_syncable_block`(M3)、既有 Include 搬到最頂端與首行多路徑正規化(M4)、`validate_url` 拒絕 query/fragment/userinfo(M5)、`validate_host_text` 只接受「恰好一個 Host 區塊」的文字(R3-M1)、`baseline_established`(Join 才 false)與 `phrase_cleanup_pending` 持久化(H4、M10)。
