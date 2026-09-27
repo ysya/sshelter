@@ -274,6 +274,30 @@ API(全部 `Authorization: Bearer <token>`,JSON):
   一台裝置,詢問是否一併 `DELETE` 中繼上的 chain。
 - 網路 I/O 只在同步執行緒(std thread)或 `tauri::async_runtime::spawn_blocking` 裡跑
   (`reqwest::blocking` 在 tokio runtime 內會 panic);持有 doc 鎖時絕不做網路 I/O。
+- **每個 OS 使用者只跑一個同步引擎**:引擎啟動時在 app data 目錄對 `sync.lock` 取獨占鎖
+  (`File::try_lock`);拿不到鎖的 process(第二個 instance、兩個 MCP adapter 同時拉起的
+  `--mcp-host`)不跑 worker、存檔時不規劃,所有會改狀態的 sync 命令預先拒絕,狀態列顯示
+  「Sync is running in another SSHelter process」。它對 SSH 檔的編輯對作用中的引擎而言就是外部編輯。
+- **喚醒合併**:worker 每輪開始前先清空排隊的喚醒,批次寫入(遷入幾十台主機)只觸發一輪,
+  不會把整條 chain 打到每分鐘上限。
+- **push conflict 的立即重跑有上限**:連續 3 輪都以 conflict 結束後不再立即重跑,只靠 45 秒
+  tick,並在狀態列說明「有變更因中繼上的較新版本無法讀取而上傳不了 —— 請更新 SSHelter」;沒有
+  conflict 的一輪、Join/Leave 會歸零。
+- **受管檔被清空**(解析出 0 個 Host 區塊、快取仍有存活主機、基線已建立)比照「受管檔消失」,
+  從 chain 重新長出。部分截斷或還原成舊版仍是一般外部編輯(缺少的區塊會 tombstone)—— 明示限制,
+  README 已說明;要刪除同步主機請在 app 裡刪或 Leave。
+- **不依超前磁碟的 in-memory doc 行動**:受管檔的 in-memory 區塊序列化後(與 `persist_file` 同一個
+  serializer)和磁碟位元組不同就先重載 —— 讀檔(gather)與 `apply_and_commit` 都檢查,後者不同就
+  整輪作廢重跑。`config_move_host` 寫檔失敗後從磁碟重載 doc,不留下比磁碟新的記憶體內容。
+- **中繼序號倒退**:pull 回來的 `latestSeq` 小於本機 cursor(自架中繼重設/從備份還原)→ cursor 歸零
+  重新拉取(合併是冪等的)。中繼序號已追上舊 cursor 時偵測不到 —— 需要中繼 epoch,留待協定變更。
+- 啟動時 keychain 助記詞派生出的 `chain_id` 與狀態不符 → 不派生金鑰,狀態列顯示「the recovery
+  phrase in the keychain belongs to a different sync chain; leave and rejoin」。加入中的輪次收到中繼
+  404 → 「This sync chain no longer exists on the relay (deleted from another device or expired) —
+  leave it on this device」。
+- Create/Join 在 SSH config 尚未載入(例如新機器沒有 `~/.ssh/config`)時預先拒絕,不在猜測的路徑
+  建檔(前端才知道使用者設定的 config 路徑);加入狀態與助記詞存下之後,受管檔準備步驟失敗不讓
+  Create/Join 失敗(下一輪重做),Create 一定回傳助記詞。
 - 離線:pull 失敗只記狀態,不阻擋任何本機操作;已持久化的 dirty 記錄下次上線再送。
 
 ## 7. 前端
@@ -358,6 +382,13 @@ API(全部 `Authorization: Bearer <token>`,JSON):
   `sync_resolve_shadowed(alias, file, action)`,**以檔案路徑明確定位**要改的那個區塊;
   既有的 `config_rename_host`/`config_remove_host` 以「第一個命中」定位,會依 Include 順序
   誤中同步檔那份,不可用於此。
+- 搬進受管檔的防護(wizard 與 sidebar 拖進「Synced」都適用):受管檔已定義同一 alias(含要搬的
+  區塊的第一個 alias)→ 拒絕並請使用者改用重複處理;加入後第一輪同步(基線輪)完成前 → 拒絕。
+  wizard 排除任一 pattern 已在同步檔裡的主機,只有 chain 沒有主機時(例如剛 Create)才預選全部,
+  第一輪同步完成前停用 Move;`sync://applied` 也讓重複清單重新查詢。
+- Include 置頂的附帶效果:搬進同步檔的主機會在主 config 之前被讀到,它自己設定的選項從此優先於
+  主 config 前段的 wildcard 區塊(如 `Host *`);wizard 以文案告知。「以原檔名加上 tag」只替來自
+  被 Include 檔案的主機加 tag,主 config 的主機不加(否則全都會是 `config`)。
 - 本地已有同名但不同內容的金鑰檔:不覆蓋,提示改名後重試(§3.3)。
 - 本地 keychain 已有同 alias 密碼且「Sync passwords」開啟:以記錄 LWW 決定,
   並在完成頁列出被覆蓋的項目。
