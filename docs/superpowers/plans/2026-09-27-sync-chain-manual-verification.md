@@ -72,3 +72,9 @@ entry all follow the OS user, so two processes in one account would fight over t
     without it, the default is `http://127.0.0.1:8787`.
 26. macOS update: after installing a new version, any keychain prompt appears once; after allowing
     it, sync resumes without re-entering the words.
+27. Offline edit survives a vanished file: stop the relay, edit a synced host in A's UI, quit A,
+    delete `~/.ssh/sshelter/hosts.config`, start A, then start the relay → hosts.config has every
+    chain host plus A's edited version, and B receives A's edit.
+28. Relay restored from backup (self-hosted): snapshot the relay's `.wrangler/state`, add hosts on A,
+    restore the snapshot, sync A → A re-uploads what the relay lost; a newly joined device gets
+    every host.
