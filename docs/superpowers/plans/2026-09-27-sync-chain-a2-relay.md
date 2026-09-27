@@ -396,6 +396,17 @@ describe("records", () => {
     expect((await push([item(hid(1))])).status).toBe(429);
     expect((await destroy()).status).toBe(429);
   });
+
+  it("keeps counting across delete and re-create within the same minute", async () => {
+    await create(); // 第 1 次
+    for (let i = 0; i < 118; i++) {
+      expect((await pull(0)).status).toBe(200); // 第 2..119 次
+    }
+    expect((await destroy()).status).toBe(204); // 第 120 次
+    // 同一個 instance、同一分鐘:DELETE 不把計數歸零,重建是第 121 次 → 429,且沒有建出 schema。
+    expect((await create()).status).toBe(429);
+    expect(await env.CHAIN.getByName(chain).exists()).toBe(false);
+  });
 });
 ```
 
@@ -596,11 +607,12 @@ export class ChainStore extends DurableObject<Env> {
   /** 201 新建、200 已存在、404 token 不符、429 超過每 chain 速率。建鏈的每 IP 限制在 Worker 層。 */
   async create(tokenHash: string): Promise<201 | 200 | 404 | 429> {
     if (!this.hasSchema()) {
+      // 建鏈那一次也計數,而且要看結果:計數跟著 instance 走、DELETE 不歸零,同一分鐘內刪掉再建也可能超限。
+      if (this.rateLimited()) return 429;
       this.ctx.storage.sql.exec(SCHEMA);
       this.setMeta("token_hash", tokenHash);
       this.setMeta("latest_seq", "0");
       this.setMeta("created_at", String(Date.now()));
-      this.rateLimited(); // 建鏈那一次也算進每 chain 的請求數(第 1 次,不可能超限)
       await this.touch(true);
       return 201;
     }
@@ -850,7 +862,7 @@ Expected: 產生 `relay/worker-configuration.d.ts`(要 commit);內含 `interface
 - [ ] **Step 5: 執行測試與型別檢查確認通過**
 
 Run: `cd relay && npx vitest run 2>&1 | tail -8 && npm run typecheck`
-Expected: 兩個測試檔全部通過(`relay.test.ts` 13 個、`ip-limit.test.ts` 2 個)、兩份 tsconfig 型別檢查無誤。若 `stub.create()` 之類 RPC 呼叫型別報錯,確認 `worker-configuration.d.ts` 已重新產生且 `Env` 綁定型別是 `DurableObjectNamespace<ChainStore>`。若 `exports.default.fetch` 或 `env.CHAIN` 型別報錯,確認 `test/tsconfig.json` 的 `types` 是 `@cloudflare/vitest-plugin/types` 且 `env.d.ts` 的 `ProvidedEnv extends Env`。若串流 body 的測試在 workerd 裡因 `duplex` 選項報錯,改用 `new Request(url, { method: "POST", headers, body: new Blob([oversized]) })`(Blob body 同樣沒有 `Content-Length` 可提前拒絕的保證,仍走串流上限)。
+Expected: 兩個測試檔全部通過(`relay.test.ts` 14 個、`ip-limit.test.ts` 2 個)、兩份 tsconfig 型別檢查無誤。若 `stub.create()` 之類 RPC 呼叫型別報錯,確認 `worker-configuration.d.ts` 已重新產生且 `Env` 綁定型別是 `DurableObjectNamespace<ChainStore>`。若 `exports.default.fetch` 或 `env.CHAIN` 型別報錯,確認 `test/tsconfig.json` 的 `types` 是 `@cloudflare/vitest-plugin/types` 且 `env.d.ts` 的 `ProvidedEnv extends Env`。若串流 body 的測試在 workerd 裡因 `duplex` 選項報錯,改用 `new Request(url, { method: "POST", headers, body: new Blob([oversized]) })`(Blob body 同樣沒有 `Content-Length` 可提前拒絕的保證,仍走串流上限)。
 
 - [ ] **Step 6: README 與 Commit**
 
@@ -972,4 +984,5 @@ gh variable set SSHELTER_RELAY_URL --repo ysya/sshelter --body "https://sshelter
 - **Review Focus 對應**:1 → `reports a conflict when baseSeq is stale`;2 → `validates bodies…`(since=abc/-1)與 `assigns increasing seqs…`(since=99);3 → `validates bodies…`(含非 base64、NUL、非 ASCII、重複 idHash、201 筆);4 → `hides the chain from a different token…`;5 → `refuses oversize records…`、`charges replacements net of the old row…`、`keeps tombstones…`;6 → `deletes everything and lets the same instance be created again`;7 → `does not allocate storage for chains that were never created`;8 → `ip-limit.test.ts`;9 → `refuses oversize records, oversize bodies…`(string 與 stream body)。
 - **Codex review(2026-09-27,兩輪)已納入**:配額在判定接受之後計算、tombstone 與 nonce 計入、記錄數上限、body 大小串流上限、每 IP 建鏈與總請求限制(finding 4、H1、M6);`deleteAll()` 後 schema 重建與讀不存在的 chain 不建 schema(18、H1);嚴格 base64 讓 JS/SQLite 長度一致(H2);pull 刷新 TTL(M7);fixture 改成合法 hex/base64(19);測試型別改用官方 `@cloudflare/vitest-plugin/types` 與 `wrangler types`(20);測試數量 13 + 2(L1)。
 - **Codex 第三輪已納入**:建鏈那一次也計入每 chain 速率、已授權超限一律 429(含 PUT/DELETE)(R3-M2);建鏈桶明確定義為「PUT 嘗試次數」並同步 spec/README/測試用語(R3-M3);tombstone 配額測試註解補上既有 16 bytes(R3-L2);`duplex: "half"` 在 workerd 會被忽略,串流 body 測試不依賴它(只是為了 Node 型別/相容而保留)。
+- **Codex 第四輪已納入**:新建分支也要看每 chain 速率的結果 —— 計數跟著 instance 走、DELETE 不歸零,同一分鐘內刪掉再建是第 121 次 → 429 且不建 schema(R4-M1,`keeps counting across delete and re-create within the same minute`);測試數量改為 14 + 2。
 - **未採用 Workers Rate Limiting binding 的原因**:它的 `period` 只能是 10 或 60 秒、per-colo 且 best-effort,官方文件與 Miniflare README 都沒有說明本機/測試支援;DO 計數器可精確表達「每小時 N 次」且能在 vitest 裡驗證。

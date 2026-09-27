@@ -153,7 +153,8 @@ API(全部 `Authorization: Bearer <token>`,JSON):
   記錄數 ≤ 4096;request body ≤ 1 MiB:以 byte 上限的**串流**讀取,超過即取消回 `413`,
   不把整個 body 讀進記憶體再檢查;之後才 JSON 解析。
 - 每 chain 每分鐘 ≤ 120 次請求(所有端點都計,含建鏈那一次;已授權但超限一律 `429`,不論 PUT/GET/
-  POST/DELETE)。
+  POST/DELETE)。計數跟著 DO instance 走、`DELETE` 不歸零:同一分鐘內刪掉再建也照算(建鏈那一次
+  超限同樣 `429`)。
 - **跨 chain 的防線**(每個來源 IP,`CF-Connecting-IP`):每小時最多 20 次建鏈請求(`PUT`,
   不論結果是 201/200/404 —— 計的是嘗試,不是成功建立的 chain 數)、所有請求合計 ≤ 1200 次(`429`)。**未建立的 chain 被讀取(GET/POST/DELETE)一律 `404` 且不配置任何
   儲存**:DO 只在 `PUT` 建立時才建 schema,其餘 RPC 先看 `sqlite_master` 有沒有 `meta` 表,
@@ -174,25 +175,33 @@ API(全部 `Authorization: Bearer <token>`,JSON):
   tombstone、本機同步檔卻還留著的區塊被移除(`persist_file` 先備份);chain 不認識的區塊保留。
   成功後 `baseline_established = true` 並立刻再跑一輪,本機獨有的區塊才以新主機上傳。
   少了這一步,Leave 後保留的舊區塊會在重新加入時以「現在」的時間戳復活遠端的刪除。
+- **受管檔的不變式**:`hosts.config` 只放具名、互不重複的 Host 區塊(§3.1)。每輪讀檔時檢查
+  (`check_managed_items`);違反(含 wildcard 的區塊、同一 alias 出現兩次)→ 整輪停在讀檔階段:
+  不 diff、不 pull 套用、不 push,狀態列顯示要搬走/刪掉哪個區塊。因為這個不變式成立,遠端效果
+  (文字已先驗證)套用時不可能失敗;萬一失敗(bug),套用**全有或全無**:什麼都不寫、不發布、
+  cursor 不前進,錯誤顯示在狀態列,下一輪重試 —— 絕不在「部分套用」的狀態上前進 cursor。
+- **本機編輯的時間戳**:SSHelter 自己寫 `hosts.config`(任何 `persist_file`)時,`note_file_written`
+  **在存檔當下**就做區塊 diff、產生 dirty 記錄(`updated_at_ms` = 存檔時間)並立刻持久化,同時
+  換 generation 讓在途輪次的舊快照作廢 —— 所以時間戳精確、重啟不失真,也不會把別的區塊較晚的
+  修改時間套到較早修改的區塊上。引擎自己套用遠端效果的寫入不算本機編輯(`EngineWrite`)。
+  **外部編輯**(文字編輯器)只能由同步輪次發現,時間戳用檔案 mtime —— 整檔的近似值:同一次
+  外部存檔裡改到的多個區塊會拿到同一個時間。這是明示的限制。
 - **一輪的順序**(每步可獨立失敗;失敗不影響前一步已持久化的結果):
-  1. 讀取受管檔目前的區塊(磁碟指紋與 in-memory 不同就先重載),記下本輪的**檔案指紋**與
-     **檔案 mtime**。
-  2. 本機 diff → 產生 dirty 記錄(升版本、單調時間戳)並**立刻持久化**。本機變更的
-     `updated_at_ms` 是**逐區塊**的修改時間:app 自己存檔的區塊 = 存檔當下(`persist_file` 寫完
-     受管檔時逐區塊比對前一次快照並記下時間);外部編輯的區塊 = gather 時的檔案 mtime(整檔的
-     近似值,文件明示此限制)。不是同步執行緒掃到的時間,也不會把別的區塊較晚的修改時間套到
-     較早修改的區塊上;離線時也一樣,重試沿用同一版本與時間戳。心跳(device 記錄)才用現在時間。
+  1. 讀取受管檔目前的區塊(磁碟指紋與 in-memory 不同就先重載)、檢查不變式,記下本輪的
+     **檔案指紋**與**檔案 mtime**。
+  2. 本機 diff(只會抓到外部編輯;app 的存檔已在存檔當下規劃過)→ dirty 記錄(升版本、單調
+     時間戳 = 檔案 mtime)並**立刻持久化**。離線時也一樣,重試沿用同一版本與時間戳。心跳
+     (device 記錄)才用現在時間。
   3. `pull(since = cursor_seq)`:逐筆解密、驗證身分、LWW 合併;結果先留在記憶體(含
      `cursor_seq = latestSeq`)。
-  4. **套用到本機**:短暫鎖 doc,先比對第 1 步的指紋 —— 受管檔若在這段網路時間內被改過
-     (UI 存檔或外部編輯),**整輪的 pull/merge 結果丟棄、cursor 不前進**,立刻再跑一輪
-     (下一輪的 diff 會把新的本機編輯變成更新的 dirty 記錄,LWW 自然正確);指紋相同才把
-     host 效果寫進 `hosts.config`(經既有 `persist_file`),並把合併後的記錄與 cursor 持久化。
-     沒有 host 效果時免比指紋(只有 device/meta 變動,與檔案無關)。效果先套在區塊副本上;
-     **套不上的 alias**(本機同名區塊含 wildcard 等)**不進快取**(其記錄退回合併前的本機版本或移除)
-     並計入 `last_error`,否則下一輪會把它當成本機刪除而產生 tombstone。持久化失敗時先退回舊區塊、
-     再從磁碟重載(磁碟可能已是新內容:寫入成功但指紋計算失敗),讓 in-memory 與磁碟一致;
-     重載也失敗才回報錯誤。
+  4. **套用 + 發布是同一個交易**(`apply_and_commit`,全程持有 doc 鎖):比 generation → 比第 1 步的
+     指紋 —— 受管檔若在這段網路時間內被改過(UI 存檔或外部編輯),**整輪的 pull/merge 結果丟棄、
+     cursor 不前進**,立刻再跑一輪 —— 指紋相同才在區塊副本上套效果、經 `persist_file` 寫進
+     `hosts.config`,**仍持有 doc 鎖**時把合併後的記錄與 cursor 發布並持久化。所有會換 generation
+     的路徑都先拿 doc 鎖,所以不會出現「檔案已寫入遠端內容、快取卻被拒絕」,下一輪也就不會把
+     已套用的遠端內容誤判成本機修改。持久化失敗時先退回舊區塊、再從磁碟重載(磁碟可能已是新
+     內容:寫入成功但指紋計算失敗);重載也失敗 → 整份 in-memory doc 作廢(`None`)並發
+     `sync://applied` 讓前端重新載入,絕不留下可能與磁碟不同、看起來卻有效的 doc。
   5. `push(dirty)`(分批:每批 ≤ 200 筆且 ≤ 512 KiB;唯讀模式略過)。**accepted 的 seq 只更新
      該筆 `LocalRecord.seq` 並清 dirty,絕不推進 `cursor_seq`**(否則會跳過其他裝置在中間寫入
      的序號);`conflict` 的記錄本輪不處理,只標記「立刻再跑一輪」,下一輪 pull 會拿到它。
@@ -215,17 +224,22 @@ API(全部 `Authorization: Bearer <token>`,JSON):
   顯示「請更新 SSHelter」。
 - **生命週期與同步的互斥**:runtime 的 `generation`、狀態、金鑰放在**同一把鎖**裡(`SyncCore`),
   永遠一起快照、一起替換 —— 分開鎖會出現「新 generation + 舊狀態」的交錯。同步輪次開始時一次
-  取得三者的快照;`apply_effects` 在 doc 鎖內、寫檔前再比一次 generation,回寫狀態(`commit_state`)
-  也比;不同就整輪丟棄。Create/Join/Leave 全程持有一把 **lifecycle 鎖**(含網路等待與 keychain
-  讀寫,跑在 `spawn_blocking`),彼此互斥、前置檢查也在鎖內 —— 舊 Leave 不可能刪掉新 Join 剛存的
-  助記詞,兩個 Join 也不可能同時通過檢查;換 generation/狀態/金鑰時再短暫持有 doc 鎖(與寫檔互斥),
-  鎖順序固定為 lifecycle → doc → core。改 relay URL、改裝置名、Forget device 這些只動狀態的命令
-  在 core 鎖內「+1 並改狀態」一次完成。
-- **從本機產生記錄**:兩個時機做「區塊 diff」——(a)SSHelter 自己對 `hosts.config`
-  的每次 `persist_file` 之後(喚醒同步執行緒);(b)同步 tick 時檔案指紋與上次不同(使用者
-  手改)。diff = 逐區塊序列化後與快取比對,變了就升版本、標 dirty,消失的區塊 tombstone。
-  Keys dialog 勾選/取消 → key 記錄;密碼儲存/刪除(既有 `secrets_set/delete`
-  命令)→ 本機「Sync passwords」開啟時產生記錄(Phase B)。
+  取得三者的快照;`apply_and_commit` 在 doc 鎖內比 generation,回寫狀態(`commit_state`)也比;
+  不同就整輪丟棄。**每個會換 generation 的路徑都先拿 doc 鎖**:Create/Join/Leave(換 generation/
+  狀態/金鑰時)、只動狀態的命令(`mutate_state`:改裝置名、Forget device、未加入時改 relay URL)、
+  以及 `note_file_written`(本來就在 `persist_file` 的 doc 鎖內)。Create/Join/Leave 與改 relay URL
+  全程持有一把 **lifecycle 鎖**(含網路等待與 keychain 讀寫,跑在 `spawn_blocking`),彼此互斥、
+  前置檢查也在鎖內 —— 舊 Leave 不可能刪掉新 Join 剛存的助記詞,兩個 Join 不可能同時通過檢查,
+  Join 驗證中途也換不掉它驗證的 relay。鎖順序固定為 lifecycle → doc → core。同步輪次失敗時,
+  錯誤只記在產生它的那一代狀態上(generation 相符才寫 `last_error`):舊 chain 的逾時不會寫進
+  新 chain。
+- **relay URL 只能在未加入時更改**:cursor 與每筆記錄的 seq 都是某一個 relay 的序號,原地換
+  relay 會讓 pull 跳過資料。要換 relay:Leave → 改 URL → 在新 relay 上 Create/Join。
+- **從本機產生記錄**:兩個時機做「區塊 diff」——(a)SSHelter 自己寫 `hosts.config` 的當下
+  (`note_file_written`,見上);(b)同步 tick 時檔案指紋與上次不同(使用者手改)。diff =
+  逐區塊序列化後與快取比對,變了就升版本、標 dirty,消失的區塊 tombstone。Keys dialog 勾選/取消
+  → key 記錄;密碼儲存/刪除(既有 `secrets_set/delete` 命令)→ 本機「Sync passwords」開啟時
+  產生記錄(Phase B)。
 - 裝置身分:首次執行產生 `device_id`(16 bytes 隨機 hex),名稱預設主機名、可改。
 - Create:`PUT` 建鏈 → 存助記詞 → 種下 meta 與 device 記錄。Join:先 `GET …?since=0`
   驗證(`404` → 「no sync chain matches this recovery phrase」,不建鏈)→ 存助記詞 → 種下
@@ -250,7 +264,8 @@ API(全部 `Authorization: Bearer <token>`,JSON):
     瞬間畫面就消失,無法保證使用者看過並確認。
   - 已加入:狀態列(last sync、錯誤)、裝置清單(名稱/平台/last seen/持有金鑰/**Forget**)、
     「Show pairing code」(明確按鈕、再次顯示 24 詞給新裝置抄)、
-    「Sync passwords」開關(本機)、relay URL(進階)、「Leave chain」。
+    「Sync passwords」開關(本機)、relay URL(唯讀顯示,註明「Leave the chain to switch relays」)、
+    「Leave chain」。
   - 助記詞(建立回傳、Show、Join 輸入)**不經 TanStack Query 的 mutation/query cache**:
     直接 `tauriInvoke` + 元件 local state,關閉視窗即清掉。
 - **Keys dialog**:每把金鑰一個「Synced」開關(硬體/無私鑰檔者停用)。

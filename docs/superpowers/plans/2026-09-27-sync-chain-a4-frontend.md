@@ -27,7 +27,7 @@
 3. 建立 chain 後狀態立刻變 joined —— 助記詞對話框必須還在,且未勾選前不可關閉(Task 2:state 在 `SyncPane`;手動驗證)。
 4. 加入 chain 時 relay 404(助記詞錯)—— 顯示可讀錯誤、表單保留輸入(Task 2 手動驗證)。
 5. 離開 chain 時「Delete from relay」預設不勾、且說明會影響其他裝置(Task 2)。
-6. 預設中繼不可達或要用自架 —— 未加入畫面就能改 relay URL(Task 2)。
+6. 預設中繼不可達或要用自架 —— 未加入畫面就能改 relay URL;已加入時只能看、不能改(後端也會拒絕),要換 relay 得先 Leave(Task 2)。
 7. 另一台裝置改了主機 —— 45 秒內本機 sidebar 更新、不需 reload(Task 1 `sync://applied` → invalidate `["config"]`;手動驗證)。
 
 ---
@@ -689,7 +689,12 @@ function JoinedPane({ status: s, onShowWords }: { status: SyncStatus; onShowWord
 
       <Section title="Advanced" description="The relay only stores encrypted records.">
         <SettingsGroup>
-          <RelayUrlRow current={s.relay_url} />
+          {/* Read-only while joined: the cursor and every record's seq belong to this relay (spec §6). */}
+          <SettingsRow label="Relay URL" description="Leave the chain to switch relays, then create or join on the new one.">
+            <span className="max-w-64 truncate font-mono text-xs text-muted-foreground" title={s.relay_url}>
+              {s.relay_url}
+            </span>
+          </SettingsRow>
           <SettingsRow label="Leave chain" description="This device keeps every file it has; it just stops syncing.">
             <Button type="button" variant="outline" size="sm" className="h-7 text-destructive hover:text-destructive" onClick={() => setLeaveOpen(true)}>
               Leave…
@@ -963,7 +968,7 @@ entry all follow the OS user, so two processes in one account would fight over t
 1. A: Settings → Sync → Relay URL `http://sync.example.com` is refused (https message); the local
    `http://127.0.0.1:8787` is accepted. Create chain → the words dialog is still open while Status
    already says Synced and Devices lists A → cannot close until confirmed → Continue opens the
-   migration wizard.
+   migration wizard. While joined, the Relay URL row is read-only ("Leave the chain to switch relays").
 2. A: Choose hosts… → move two hosts with "tag by file" → hosts.config contains both, tags added,
    main config's first non-comment line is `Include ~/.ssh/sshelter/hosts.config` (above any
    existing Include).
@@ -1005,6 +1010,7 @@ git commit -m "docs(sync): describe sync chain setup and record the manual verif
 
 - **Spec 覆蓋**:§7 Settings Sync pane(未加入含 relay URL/建立後的確認畫面在父層/已加入、Show pairing code、裝置清單 Forget、relay URL、Leave、phrase cleanup 重試)→ Task 2;§7 新裝置上手(Join → 遷入對話框)與 §10 wizard 主機/tag 部分、檔案定位的同名主機處理 → Task 3;事件(status/applied/conflict)與焦點觸發 → Task 1;「Synced」預設顯示名 → Task 2 `labelManagedFile`;§2 Forget 不是撤權的文案 → Task 2 + README;§7 Keys dialog 開關與金鑰警示、`Sync passwords` 開關屬 Phase B,刻意不在此。
 - **型別一致**:hooks 的 command 名稱與 A3 註冊清單一致(`sync_status`、`sync_create_chain`、`sync_join_chain`、`sync_show_words`、`sync_leave_chain`、`sync_now`、`sync_set_relay_url`、`sync_set_device_name`、`sync_forget_device`、`sync_migrate_hosts`、`sync_duplicate_aliases`、`sync_resolve_shadowed`);`SyncStatus` 欄位(`managed_file`、`hosts_in_sync`、`devices[].is_this`、`phrase_cleanup_pending`、`read_only`)與 A3 `status_from` 一致;`sync_resolve_shadowed` 的 `action` 字串與 A3 `ShadowedAction` 的 serde 小寫一致;`sync://applied` payload 為數字。
-- **Review Focus 對應**:1 → Task 1 `cleanWordsInput` 測試;2 → Task 1 `groupHostsForMigration` 測試;3 → Task 2 的 `freshWords`/`saved` 在 `SyncPane`(escape/outside 阻擋)+ 手動驗證第 1 項;4 → Task 2 `onJoin` catch 保留 `words` + 手動第 8 項;5 → Task 2 Leave 對話框預設 `deleteRemote=false` 與說明文字;6 → Task 2 `RelayUrlRow` 在 `NotJoinedPane`;7 → Task 1 `sync://applied` listener + 手動第 3/4 項。
+- **Review Focus 對應**:1 → Task 1 `cleanWordsInput` 測試;2 → Task 1 `groupHostsForMigration` 測試;3 → Task 2 的 `freshWords`/`saved` 在 `SyncPane`(escape/outside 阻擋)+ 手動驗證第 1 項;4 → Task 2 `onJoin` catch 保留 `words` + 手動第 8 項;5 → Task 2 Leave 對話框預設 `deleteRemote=false` 與說明文字;6 → Task 2 `RelayUrlRow` 只在 `NotJoinedPane`、`JoinedPane` 唯讀;7 → Task 1 `sync://applied` listener + 手動第 3/4 項。
 - **Codex review(2026-09-27)已納入**:確認畫面被卸載(11)、shadowed 操作以第一個命中定位(12 → `useResolveShadowed` + A3 `sync_resolve_shadowed`)、一般遠端更新不刷新 cache(25 → `sync://applied`)、relay URL 只能在 joined 改(26)、useMutation 快取助記詞(27 → 直接 invoke + local state)、雙 checkout 不是兩台裝置(28)、重複宣告 `queryClient` 與未使用 `Label` import(29)、Forget device 文案(1)。
+- **Codex 第四輪已納入**:relay URL 只能在未加入時改(R4-M5)—— `JoinedPane` 改為唯讀顯示並說明要先 Leave。
 - **Codex 第二輪已納入**:wildcard 規則改為「所有 pattern 皆具名」且前後端一致(M3 → `isSyncableHost`,不再用 `isWildcardOnly`);shadowed 文案改為逐選項語意、移除本地區塊會失去其額外選項(M1);手動驗證加入基線輪案例(H4)。
