@@ -184,6 +184,9 @@ API(全部 `Authorization: Bearer <token>`,JSON):
   **在存檔當下**就做區塊 diff、產生 dirty 記錄(`updated_at_ms` = 存檔時間)並立刻持久化,同時
   換 generation 讓在途輪次的舊快照作廢 —— 所以時間戳精確、重啟不失真,也不會把別的區塊較晚的
   修改時間套到較早修改的區塊上。引擎自己套用遠端效果的寫入不算本機編輯(`EngineWrite`)。
+  加入中的任何受管檔 app 寫入都換 generation,即使檔案被改成違反不變式(那次不規劃,下一輪停在
+  驗證錯誤)。狀態寫檔失敗時 SSH 檔照樣存成功,但狀態列顯示錯誤、記下 `unsaved`,下一輪在任何
+  網路操作前先重存,失敗就停下 —— 不在未落盤的狀態上 pull/push。
   **外部編輯**(文字編輯器)只能由同步輪次發現,時間戳用檔案 mtime —— 整檔的近似值:同一次
   外部存檔裡改到的多個區塊會拿到同一個時間。這是明示的限制。
 - **一輪的順序**(每步可獨立失敗;失敗不影響前一步已持久化的結果):
@@ -195,13 +198,15 @@ API(全部 `Authorization: Bearer <token>`,JSON):
   3. `pull(since = cursor_seq)`:逐筆解密、驗證身分、LWW 合併;結果先留在記憶體(含
      `cursor_seq = latestSeq`)。
   4. **套用 + 發布是同一個交易**(`apply_and_commit`,全程持有 doc 鎖):比 generation → 比第 1 步的
-     指紋 —— 受管檔若在這段網路時間內被改過(UI 存檔或外部編輯),**整輪的 pull/merge 結果丟棄、
+     指紋(**每次發布都比**,即使這輪沒有 host 效果)—— 受管檔若在這段網路時間內被改過(UI 存檔或外部編輯),**整輪的 pull/merge 結果丟棄、
      cursor 不前進**,立刻再跑一輪 —— 指紋相同才在區塊副本上套效果、經 `persist_file` 寫進
      `hosts.config`,**仍持有 doc 鎖**時把合併後的記錄與 cursor 發布並持久化。所有會換 generation
      的路徑都先拿 doc 鎖,所以不會出現「檔案已寫入遠端內容、快取卻被拒絕」,下一輪也就不會把
      已套用的遠端內容誤判成本機修改。持久化失敗時先退回舊區塊、再從磁碟重載(磁碟可能已是新
-     內容:寫入成功但指紋計算失敗);重載也失敗 → 整份 in-memory doc 作廢(`None`)並發
-     `sync://applied` 讓前端重新載入,絕不留下可能與磁碟不同、看起來卻有效的 doc。
+     內容:寫入成功但指紋計算失敗)—— 重載後磁碟若正是剛寫的內容,就當作已提交照常發布,否則
+     本輪作廢;重載也失敗 → 整份 in-memory doc 作廢(`None`)並發 `sync://applied` 讓前端重新
+     載入,絕不留下可能與磁碟不同、看起來卻有效的 doc。tray 重建與所有事件都在**放掉鎖之後**:
+     建立 tray menu 會同步等待主執行緒,持 doc 鎖呼叫會和主執行緒上等 doc 鎖的 command 互等。
   5. `push(dirty)`(分批:每批 ≤ 200 筆且 ≤ 512 KiB;唯讀模式略過)。**accepted 的 seq 只更新
      該筆 `LocalRecord.seq` 並清 dirty,絕不推進 `cursor_seq`**(否則會跳過其他裝置在中間寫入
      的序號);`conflict` 的記錄本輪不處理,只標記「立刻再跑一輪」,下一輪 pull 會拿到它。
@@ -232,7 +237,8 @@ API(全部 `Authorization: Bearer <token>`,JSON):
   前置檢查也在鎖內 —— 舊 Leave 不可能刪掉新 Join 剛存的助記詞,兩個 Join 不可能同時通過檢查,
   Join 驗證中途也換不掉它驗證的 relay。鎖順序固定為 lifecycle → doc → core。同步輪次失敗時,
   錯誤只記在產生它的那一代狀態上(generation 相符才寫 `last_error`):舊 chain 的逾時不會寫進
-  新 chain。
+  新 chain。會等鎖、寫磁碟、讀 keychain 或做網路的 sync command 一律 async + `spawn_blocking`
+  (Tauri 的同步 command 跑在主執行緒上)。
 - **relay URL 只能在未加入時更改**:cursor 與每筆記錄的 seq 都是某一個 relay 的序號,原地換
   relay 會讓 pull 跳過資料。要換 relay:Leave → 改 URL → 在新 relay 上 Create/Join。
 - **從本機產生記錄**:兩個時機做「區塊 diff」——(a)SSHelter 自己寫 `hosts.config` 的當下
