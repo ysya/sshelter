@@ -154,7 +154,9 @@ API(全部 `Authorization: Bearer <token>`,JSON):
   不把整個 body 讀進記憶體再檢查;之後才 JSON 解析。
 - 每 chain 每分鐘 ≤ 120 次請求(所有端點都計,含建鏈那一次;已授權但超限一律 `429`,不論 PUT/GET/
   POST/DELETE)。計數跟著 DO instance 走、`DELETE` 不歸零:同一分鐘內刪掉再建也照算(建鏈那一次
-  超限同樣 `429`)。
+  超限同樣 `429`)。這個每 chain 計數放在記憶體裡,是 best-effort:DO 閒置被逐出後會歸零(持續打
+  同一條 chain 的請求會讓它保持常駐,所以實際上只在閒置之後才歸零);硬上限是下面**持久化**的
+  每 IP 桶。
 - **跨 chain 的防線**(每個來源 IP,`CF-Connecting-IP`):每小時最多 20 次建鏈請求(`PUT`,
   不論結果是 201/200/404 —— 計的是嘗試,不是成功建立的 chain 數)、所有請求合計 ≤ 1200 次(`429`)。**未建立的 chain 被讀取(GET/POST/DELETE)一律 `404` 且不配置任何
   儲存**:DO 只在 `PUT` 建立時才建 schema,其餘 RPC 先看 `sqlite_master` 有沒有 `meta` 表,
