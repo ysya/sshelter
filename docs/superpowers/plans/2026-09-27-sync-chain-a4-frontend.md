@@ -23,7 +23,7 @@
 ## Review Focus
 
 1. 使用者把 24 詞貼成多行、含逗號或編號(`1. abandon`)—— 前端先整理成單行空白分隔再送後端(Task 1 `cleanWordsInput` 測試)。
-2. 遷入清單必須排除 wildcard 區塊與已在同步檔的主機(Task 1 `groupHostsForMigration` 測試)。
+2. 遷入清單必須排除 wildcard 區塊(含 `Host web *.internal` 這種混合 pattern)與已在同步檔的主機,規則與後端相同(Task 1 `isSyncableHost`/`groupHostsForMigration` 測試)。
 3. 建立 chain 後狀態立刻變 joined —— 助記詞對話框必須還在,且未勾選前不可關閉(Task 2:state 在 `SyncPane`;手動驗證)。
 4. 加入 chain 時 relay 404(助記詞錯)—— 顯示可讀錯誤、表單保留輸入(Task 2 手動驗證)。
 5. 離開 chain 時「Delete from relay」預設不勾、且說明會影響其他裝置(Task 2)。
@@ -48,6 +48,7 @@
   - 祕密呼叫(不進 cache):`createChain(deviceName): Promise<string>`、`joinChain(words, deviceName): Promise<SyncStatus>`、`showWords(): Promise<string>`
   - `refreshSyncViews(queryClient)`、`errorMessage(error)`
   - `cleanWordsInput(raw: string): string`
+  - `isSyncableHost(h: HostSummary): boolean`(與後端 `hosts_file::is_syncable_block` 同一條規則:所有 pattern 皆具名)
   - `groupHostsForMigration(hosts: HostSummary[], managedFile: string): { file: string; hosts: HostSummary[] }[]`
   - ui store:`syncMigrationOpen: boolean; setSyncMigrationOpen(open)`
 
@@ -58,11 +59,22 @@
 ```ts
 import { describe, expect, it } from "vitest";
 import type { HostSummary } from "@/bindings/HostSummary";
-import { cleanWordsInput, groupHostsForMigration } from "./sync-migration";
+import { cleanWordsInput, groupHostsForMigration, isSyncableHost } from "./sync-migration";
 
 function host(alias: string, file: string, patterns: string[] = [alias]): HostSummary {
   return { alias, patterns, source_file: file, tags: [], hostname: null, user: null };
 }
+
+describe("isSyncableHost", () => {
+  it("requires every pattern to be a plain name (same rule as the backend)", () => {
+    expect(isSyncableHost(host("web", "/f"))).toBe(true);
+    expect(isSyncableHost(host("web", "/f", ["web", "web.example.com"]))).toBe(true);
+    expect(isSyncableHost(host("*", "/f", ["*"]))).toBe(false);
+    expect(isSyncableHost(host("web", "/f", ["web", "*.internal"]))).toBe(false);
+    expect(isSyncableHost(host("web", "/f", ["web", "!prod"]))).toBe(false);
+    expect(isSyncableHost(host("w", "/f", []))).toBe(false);
+  });
+});
 
 describe("cleanWordsInput", () => {
   it("joins lines, strips numbering and punctuation, lowercases", () => {
@@ -82,6 +94,7 @@ describe("groupHostsForMigration", () => {
     const hosts = [
       host("web", "/home/f/.ssh/config"),
       host("*", "/home/f/.ssh/config", ["*"]),
+      host("mixed", "/home/f/.ssh/config", ["mixed", "*.internal"]),
       host("db", "/home/f/.ssh/config.d/homelab.config"),
       host("synced", managed),
     ];
@@ -108,7 +121,16 @@ Expected: FAIL —— 找不到模組。
 
 ```ts
 import type { HostSummary } from "@/bindings/HostSummary";
-import { isWildcardOnly } from "@/lib/host-display";
+
+/**
+ * Same rule as the backend's `hosts_file::is_syncable_block`: every pattern must be
+ * a plain name. `Host web *.internal` or `Host web !prod` is a wildcard rule, not a
+ * host — the sidebar's `isWildcardOnly` (all patterns wildcard, `!` ignored) is the
+ * wrong predicate for sync.
+ */
+export function isSyncableHost(h: HostSummary): boolean {
+  return h.patterns.length > 0 && h.patterns.every((p) => p !== "" && !/[*?!]/.test(p));
+}
 
 /**
  * Tidy a pasted recovery phrase before the backend validates it: one line,
@@ -132,7 +154,7 @@ export function groupHostsForMigration(
 ): { file: string; hosts: HostSummary[] }[] {
   const byFile = new Map<string, HostSummary[]>();
   for (const h of hosts) {
-    if (h.source_file === managedFile || isWildcardOnly(h)) continue;
+    if (h.source_file === managedFile || !isSyncableHost(h)) continue;
     const bucket = byFile.get(h.source_file);
     if (bucket) bucket.push(h);
     else byFile.set(h.source_file, [h]);
@@ -142,7 +164,7 @@ export function groupHostsForMigration(
 ```
 
 Run: `pnpm test -- sync-migration`
-Expected: 4 passed。
+Expected: 5 passed。
 
 - [ ] **Step 4: hooks**
 
@@ -850,7 +872,7 @@ function MigrationFlow({ onClose }: { onClose: () => void }) {
       {dups.length > 0 && (
         <div className="space-y-1.5 rounded-md border border-amber-500/40 bg-amber-500/10 p-3 text-xs">
           <p className="font-medium text-amber-700 dark:text-amber-400">Synced hosts shadow local definitions</p>
-          <p className="text-muted-foreground">The synced file is included first, so ssh ignores these local blocks. Keep the local one under a new name, or remove it and use the synced version:</p>
+          <p className="text-muted-foreground">The synced file is included first, so its options win — but ssh still takes any option the synced block does not set from these local blocks, and IdentityFile entries add up. Keep the local one under a new name, or remove it (its extra options go away) and use only the synced version:</p>
           {dups.map((d) => (
             <div key={`${d.alias}-${d.local_file}`} className="flex items-center justify-between gap-2">
               <span className="font-mono">{d.alias} <span className="text-muted-foreground">in {basename(d.local_file)}</span></span>
@@ -955,8 +977,10 @@ entry all follow the OS user, so two processes in one account would fight over t
    needing an app reload. While the relay is stopped, save an edit in A's UI, then start the relay:
    the edit is still there afterwards (the round that raced it was discarded and re-run).
 7. A: Forget device B → B disappears from A's device list; B's next sync still works (by design —
-   Forget is not revocation, the copy says so). B: Leave chain → B keeps hosts.config; Join again
-   with the words → back in sync.
+   Forget is not revocation, the copy says so). B: Leave chain → B keeps hosts.config. A: delete one
+   synced host and add another. B: Join again with the words → the deleted host disappears from B's
+   hosts.config (a backup exists), the new one appears, and a host that only B had is uploaded on
+   the following round (baseline round, then normal round).
 8. Wrong phrase on Join (valid words, wrong chain) → "no sync chain matches" error, form keeps the
    input, and the relay's `.wrangler/state` gains no new chain. Relay stopped → Status "Error",
    editing/connecting still works.
@@ -983,3 +1007,4 @@ git commit -m "docs(sync): describe sync chain setup and record the manual verif
 - **型別一致**:hooks 的 command 名稱與 A3 註冊清單一致(`sync_status`、`sync_create_chain`、`sync_join_chain`、`sync_show_words`、`sync_leave_chain`、`sync_now`、`sync_set_relay_url`、`sync_set_device_name`、`sync_forget_device`、`sync_migrate_hosts`、`sync_duplicate_aliases`、`sync_resolve_shadowed`);`SyncStatus` 欄位(`managed_file`、`hosts_in_sync`、`devices[].is_this`、`phrase_cleanup_pending`、`read_only`)與 A3 `status_from` 一致;`sync_resolve_shadowed` 的 `action` 字串與 A3 `ShadowedAction` 的 serde 小寫一致;`sync://applied` payload 為數字。
 - **Review Focus 對應**:1 → Task 1 `cleanWordsInput` 測試;2 → Task 1 `groupHostsForMigration` 測試;3 → Task 2 的 `freshWords`/`saved` 在 `SyncPane`(escape/outside 阻擋)+ 手動驗證第 1 項;4 → Task 2 `onJoin` catch 保留 `words` + 手動第 8 項;5 → Task 2 Leave 對話框預設 `deleteRemote=false` 與說明文字;6 → Task 2 `RelayUrlRow` 在 `NotJoinedPane`;7 → Task 1 `sync://applied` listener + 手動第 3/4 項。
 - **Codex review(2026-09-27)已納入**:確認畫面被卸載(11)、shadowed 操作以第一個命中定位(12 → `useResolveShadowed` + A3 `sync_resolve_shadowed`)、一般遠端更新不刷新 cache(25 → `sync://applied`)、relay URL 只能在 joined 改(26)、useMutation 快取助記詞(27 → 直接 invoke + local state)、雙 checkout 不是兩台裝置(28)、重複宣告 `queryClient` 與未使用 `Label` import(29)、Forget device 文案(1)。
+- **Codex 第二輪已納入**:wildcard 規則改為「所有 pattern 皆具名」且前後端一致(M3 → `isSyncableHost`,不再用 `isWildcardOnly`);shadowed 文案改為逐選項語意、移除本地區塊會失去其額外選項(M1);手動驗證加入基線輪案例(H4)。

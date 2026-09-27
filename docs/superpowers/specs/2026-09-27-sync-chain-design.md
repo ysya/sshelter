@@ -58,8 +58,13 @@
   規則)。刻意不用 `newfile.rs` 的 `include_insert_index`(它插在最後一個 Include **之後**):
   ssh 是 first-obtained-wins,同步檔必須是第一個被讀到的定義,§10 的「同步主機遮蔽本地同名
   主機」才成立。
-- 受管檔只放具名主機:`Host *`、`Host *.example`、`Host !x` 等含 wildcard 字元(`*`、`?`、`!`)
-  的區塊視為裝置本地的 config 結構 —— 不擷取、不上傳、收到遠端記錄時不套用、也不刪除。
+- 受管檔只放具名主機:**任一** pattern 含 wildcard/否定字元(`*`、`?`、`!`)的區塊
+  (`Host *`、`Host *.example`、`Host web *.internal`、`Host web !prod`)**整個**視為裝置本地的
+  config 結構 —— 不擷取、不上傳、不遷入、收到遠端記錄時不套用、也不刪除。前後端用同一條規則
+  (後端 `hosts_file::is_syncable_block`、前端 `isSyncableHost`),不沿用 sidebar 的
+  `isWildcardOnly`(它只認「全部都是 wildcard」,且不看 `!`)。
+- 同步 Include 若已存在但不在最頂端(舊版插法、使用者搬動),`ensure_include` 會把它搬上去;
+  多路徑的 `Include a b` 只抽走我們的 token,其他路徑留在原地。
 - **同步範圍 = 這個檔案裡的 host 區塊**。其他檔案的 host 維持裝置本地。
   提供「Move to synced」(沿用批次 move)與首次一鍵「把所有主機移入同步檔」。
 - sidebar 檔案分組把它顯示為「Synced」(預設 file alias)。
@@ -141,14 +146,20 @@ API(全部 `Authorization: Bearer <token>`,JSON):
 | `DELETE` | `/v1/chains/{chain_id}` | 刪除整個 chain(離開最後一台裝置時);同一個 DO instance 之後必須能再次 `PUT` 建立(schema 重建) |
 
 防濫用:
+- `nonce`/`ciphertext` 必須是**嚴格的標準 base64**(ASCII、長度為 4 的倍數、padding ≤ 2、非空),
+  否則 `400`。配額以字元數計 —— 只有 ASCII 才能讓 Worker 的 `.length` 與 SQLite 的 `LENGTH()`
+  一致(SQLite 遇 NUL 就停),否則可繞過配額。
 - 每筆 `ciphertext` ≤ 64 KiB;每 chain 儲存總量 ≤ 1 MiB(**含 tombstone 與 nonce**)、
-  記錄數 ≤ 4096;request body ≤ 1 MiB(`Content-Length` 超過就 `413`,讀完再驗一次長度,
-  之後才 JSON 解析)。
+  記錄數 ≤ 4096;request body ≤ 1 MiB:以 byte 上限的**串流**讀取,超過即取消回 `413`,
+  不把整個 body 讀進記憶體再檢查;之後才 JSON 解析。
 - 每 chain 每分鐘 ≤ 120 次請求(`429`)。
-- **跨 chain 的防線**:每個來源 IP(`CF-Connecting-IP`)每小時最多建立 20 條 chain
-  (`429`)—— 建鏈是唯一會配置新儲存空間的操作;既有 chain 的讀寫已由每 chain 限制與配額
-  bound 住。
-- 閒置 180 天自動清除;token hash 不符一律 `404`(不洩露 chain 存在)。
+- **跨 chain 的防線**(每個來源 IP,`CF-Connecting-IP`):每小時最多建立 20 條 chain、所有請求
+  合計 ≤ 1200 次(`429`)。**未建立的 chain 被讀取(GET/POST/DELETE)一律 `404` 且不配置任何
+  儲存**:DO 只在 `PUT` 建立時才建 schema,其餘 RPC 先看 `sqlite_master` 有沒有 `meta` 表,
+  沒有就 404 —— 讀不存在的 chain 不能留下持久化的空資料庫。
+- 閒置 180 天自動清除;**成功授權的 pull 也刷新閒置期限**(節流:同一 instance 每 6 小時最多
+  刷新一次),所以只讀不寫的裝置(唯讀模式)不會讓 chain 被清掉。token hash 不符一律 `404`
+  (不洩露 chain 存在)。
 
 ## 6. 同步引擎(Rust,`src-tauri/src/sync/`)
 
@@ -157,17 +168,25 @@ API(全部 `Authorization: Bearer <token>`,JSON):
   remote_schema_version, records: {明文快取,只有 host/device/meta}, sealed: {未處理種類的
   原始 envelope}, last_sync_ms, last_error }`。
 - 觸發:app 啟動、視窗取得焦點、每 45 秒、本地變更後立即。
+- **基線輪**:剛 Create/Join 的第一輪(`baseline_established = false`)**不做本機 diff**,先
+  pull 並以 chain 為準套用 —— chain 上仍存在的區塊以 chain 版本覆蓋本機同名區塊;chain 上已
+  tombstone、本機同步檔卻還留著的區塊被移除(`persist_file` 先備份);chain 不認識的區塊保留。
+  成功後 `baseline_established = true` 並立刻再跑一輪,本機獨有的區塊才以新主機上傳。
+  少了這一步,Leave 後保留的舊區塊會在重新加入時以「現在」的時間戳復活遠端的刪除。
 - **一輪的順序**(每步可獨立失敗;失敗不影響前一步已持久化的結果):
-  1. 讀取受管檔目前的區塊(磁碟指紋與 in-memory 不同就先重載),記下本輪的**檔案指紋**。
-  2. 本機 diff → 產生 dirty 記錄(升版本、單調時間戳)並**立刻持久化**。離線時也一樣,
-     所以離線編輯的時間戳是編輯當下、不是重新連線的時間;重試沿用同一版本與時間戳。
+  1. 讀取受管檔目前的區塊(磁碟指紋與 in-memory 不同就先重載),記下本輪的**檔案指紋**與
+     **檔案 mtime**。
+  2. 本機 diff → 產生 dirty 記錄(升版本、單調時間戳)並**立刻持久化**。本機變更的
+     `updated_at_ms` 取受管檔的 mtime(= 存檔當下,UI 存檔與外部編輯皆然),不是同步執行緒
+     掃到的時間;離線時也一樣,重試沿用同一版本與時間戳。心跳(device 記錄)才用現在時間。
   3. `pull(since = cursor_seq)`:逐筆解密、驗證身分、LWW 合併;結果先留在記憶體(含
      `cursor_seq = latestSeq`)。
   4. **套用到本機**:短暫鎖 doc,先比對第 1 步的指紋 —— 受管檔若在這段網路時間內被改過
      (UI 存檔或外部編輯),**整輪的 pull/merge 結果丟棄、cursor 不前進**,立刻再跑一輪
      (下一輪的 diff 會把新的本機編輯變成更新的 dirty 記錄,LWW 自然正確);指紋相同才把
      host 效果寫進 `hosts.config`(經既有 `persist_file`),並把合併後的記錄與 cursor 持久化。
-     沒有 host 效果時免比指紋(只有 device/meta 變動,與檔案無關)。
+     沒有 host 效果時免比指紋(只有 device/meta 變動,與檔案無關)。效果先套在區塊副本上;
+     持久化失敗(非 Conflict)時還原 in-memory 區塊,不留下與磁碟不一致的 doc。
   5. `push(dirty)`(分批:每批 ≤ 200 筆且 ≤ 512 KiB;唯讀模式略過)。**accepted 的 seq 只更新
      該筆 `LocalRecord.seq` 並清 dirty,絕不推進 `cursor_seq`**(否則會跳過其他裝置在中間寫入
      的序號);`conflict` 的記錄本輪不處理,只標記「立刻再跑一輪」,下一輪 pull 會拿到它。
@@ -176,18 +195,22 @@ API(全部 `Authorization: Bearer <token>`,JSON):
 - **合併規則(記錄層級 LWW)**:遠端 vs 本地同 id:`updated_at_ms` 大者勝;相同則 tombstone
   勝過修改;再相同則 `device_id` 字典序小者勝。輸的一方若是本地未上傳的修改 → `sync://conflict`
   toast「web-1 was changed on MacBook, your local edit was replaced」。
-- **遠端 host 記錄的三種結果**:`Upsert{alias, text}`(可解析、alias 相符、非 wildcard)/
+- **遠端 host 記錄的三種結果**:`Upsert{alias, text}`(合併前就以 `validate_host_text` 檢查:
+  恰好一個 Host 區塊、第一個 pattern 等於 alias、所有 pattern 皆非 wildcard)/
   `Delete{alias}`(**只有**驗證過的 `deleted = true`)/ `Skip`(解不開、身分不符、payload 格式
-  不支援、wildcard alias)。格式不支援**絕不**當成刪除。
+  不支援、文字不是合法區塊、wildcard)。Skip 的記錄**不進快取**——否則套用失敗的記錄會在下一輪
+  被當成「快取有、檔案沒有」而產生 tombstone,把別台的主機刪掉。格式不支援**絕不**當成刪除。
 - **未處理的種類**(Phase A 的 `key`/`password`,以及任何未知 kind):原始 envelope 存進
   `sealed`(key = `kind:idHash`),不解密、不落明文;cursor 照常前進。升級後的版本從 `sealed`
   重新處理。
 - **唯讀模式**:chain 的 `meta.schema_version` 持久化為 `remote_schema_version`;**每輪開始**
   用它判斷(不是只看本輪有沒有收到 meta)。比本 app 新 → 只套用可理解的記錄、不上傳、狀態列
   顯示「請更新 SSHelter」。
-- **生命週期與同步的互斥**:runtime 有 `generation` 計數,Create/Join/Leave/改 relay URL 都 +1。
-  同步輪次開始時記下 generation,每次要回寫狀態或寫檔前重新比對,不同就整輪丟棄——避免在途
-  的舊輪次用舊 keys 寫檔、或把已離開的 chain 狀態整份放回去。
+- **生命週期與同步的互斥**:runtime 有 `generation` 計數。Create/Join/Leave 在**持有 doc 鎖**
+  的情況下 +1 並換掉狀態/金鑰 —— 與 `apply_effects` 的寫檔互斥;`apply_effects` 在 doc 鎖內、
+  寫檔前再比一次 generation,回寫狀態(`commit_state`)也比。改 relay URL、改裝置名、Forget
+  device 這些只動狀態的命令同樣 +1(先 +1 再改狀態),在途輪次的整份狀態副本才不會蓋掉它們的
+  修改。比對不同就整輪丟棄——避免在途的舊輪次用舊 keys 寫檔、或把已離開的 chain 狀態整份放回去。
 - **從本機產生記錄**:兩個時機做「區塊 diff」——(a)SSHelter 自己對 `hosts.config`
   的每次 `persist_file` 之後(喚醒同步執行緒);(b)同步 tick 時檔案指紋與上次不同(使用者
   手改)。diff = 逐區塊序列化後與快取比對,變了就升版本、標 dirty,消失的區塊 tombstone。
@@ -198,9 +221,10 @@ API(全部 `Authorization: Bearer <token>`,JSON):
   驗證(`404` → 「no sync chain matches this recovery phrase」,不建鏈)→ 存助記詞 → 種下
   device 記錄。兩者都在 `spawn_blocking` 裡做網路。
 - Leave chain:先清 `sync-state.json` 的 chain 部分並持久化(確保停止同步)→ 再刪 keychain 的
-  助記詞。keychain 刪除失敗要**回報錯誤**且狀態列顯示「recovery phrase still in keychain」
-  與「Remove phrase」重試按鈕(再呼叫一次 `sync_leave_chain(false)`;未加入時它只重試 keychain
-  清理),不得宣稱已清乾淨。本機檔案全部保留。若是 chain 的最後
+  助記詞。keychain 刪除失敗要**回報錯誤**、把 `phrase_cleanup_pending = true` **持久化到狀態檔**
+  (重啟後警示與重試入口仍在),狀態列顯示「recovery phrase still in keychain」與「Remove
+  phrase」重試按鈕(再呼叫一次 `sync_leave_chain(false)`;未加入時它只重試 keychain 清理),
+  不得宣稱已清乾淨。本機檔案全部保留。若是 chain 的最後
   一台裝置,詢問是否一併 `DELETE` 中繼上的 chain。
 - 網路 I/O 只在同步執行緒(std thread)或 `tauri::async_runtime::spawn_blocking` 裡跑
   (`reqwest::blocking` 在 tokio runtime 內會 panic);持有 doc 鎖時絕不做網路 I/O。
@@ -248,8 +272,9 @@ API(全部 `Authorization: Bearer <token>`,JSON):
 
 - Rust 單元:HKDF 派生已知答案向量、加解密 round-trip 與 AAD 錯配失敗、
   LWW 合併全案例(時間/裝置 tie-break/tombstone)、host 區塊序列化 round-trip
-  (含 `#tags:`)、applier 不動其他區塊、wildcard 區塊不擷取/不套用/不刪除、
-  cursor 只隨 pull 前進、格式不支援的記錄不刪主機、key 落地權限與同名不同內容跳過。
+  (含 `#tags:`)、applier 不動其他區塊、wildcard 區塊(含混合 pattern)不擷取/不套用/不刪除、
+  既有 Include 搬到最頂端、cursor 只隨 pull 前進、格式不支援或文字不合法的記錄不刪主機也不進快取、
+  基線輪不復活遠端刪除、key 落地權限與同名不同內容跳過。
 - Relay:Workers Vitest 整合測試(建立、push/pull、conflict、配額含 tombstone、錯 token 404、
   delete 後同 instance 可重建、每 IP 建鏈限制)。
 - 端到端手動:**兩個 OS 使用者帳號、VM 或實體機**。自訂 config path 不能模擬兩台裝置:
@@ -276,9 +301,13 @@ API(全部 `Authorization: Bearer <token>`,JSON):
 
 **後續裝置加入時的既有資料處理**
 - 該裝置本地已有主機:Include 插在主檔**最頂端**(§3.1)→ 依 ssh 的 first-obtained-wins
-  語意,**同步檔的同名主機會遮蔽本地定義**。加入 wizard 列出重複(alias + 本地檔案),
-  逐筆選擇:保留本地(把本地區塊改名 `<alias>-local`)/ 改用同步版(移除本地區塊,先備份)
-  / 稍後處理(維持遮蔽並在 sidebar 標示)。這兩個動作走專用命令
+  語意(**逐選項**,不是整個區塊):同步檔那份先被讀到,它設定過的選項優先;本地那份仍會補上
+  同步版沒設的選項,`IdentityFile` 之類可累加的選項更會兩邊相加。所以同名主機不是「被遮蔽就
+  沒事」,而是兩份定義混在一起,必須處理。加入 wizard 列出重複(alias + 本地檔案),
+  逐筆選擇:保留本地(把本地區塊改名 `<alias>-local`)/ 改用同步版(移除本地區塊,先備份;
+  UI 要說明本地那份提供的選項會消失)/ 稍後處理(維持混合並在 sidebar 標示)。
+- 本機同步檔裡若殘留上一次成員期的區塊:加入後的**基線輪**(§6)以 chain 為準 —— chain 上仍
+  存在的以 chain 版本覆蓋,chain 上已刪除的移除(先備份),chain 不認識的當新主機上傳。這兩個動作走專用命令
   `sync_resolve_shadowed(alias, file, action)`,**以檔案路徑明確定位**要改的那個區塊;
   既有的 `config_rename_host`/`config_remove_host` 以「第一個命中」定位,會依 Include 順序
   誤中同步檔那份,不可用於此。

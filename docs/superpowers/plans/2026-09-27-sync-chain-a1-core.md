@@ -635,12 +635,14 @@ git commit -m "feat(sync): record model, wire envelope and last-writer-wins merg
   - `pub const INCLUDE_VALUE: &str = "~/.ssh/sshelter/hosts.config";`
   - `pub fn managed_path(ssh_dir: &Path) -> PathBuf`(`<ssh_dir>/sshelter/hosts.config`)
   - `pub fn ensure_managed_file(ssh_dir: &Path) -> Result<PathBuf, AppError>`
-  - `pub fn ensure_include(items: &mut Vec<Item>) -> bool`(插入了回 true;位置 = 前導註解/空行之後、其他任何項目之前 —— **不是** `newfile::include_insert_index`)
+  - `pub fn ensure_include(items: &mut Vec<Item>) -> bool`(改了回 true;位置 = 前導註解/空行之後、其他任何項目之前 —— **不是** `newfile::include_insert_index`;已存在但不在最頂端就搬上去,多路徑 Include 只抽走我們的 token)
   - `pub fn is_syncable_alias(alias: &str) -> bool`(非空且不含 `*`、`?`、`!`)
+  - `pub fn is_syncable_block(patterns: &[String]) -> bool`(非空且**所有** pattern 都 `is_syncable_alias`;`Host web *.internal` 整個區塊不同步)
   - `pub struct HostBlockText { pub alias: String, pub text: String }`
-  - `pub fn blocks_of(items: &[Item]) -> Vec<HostBlockText>`(只取 `is_syncable_alias` 的 Host 區塊)
-  - `pub fn apply_host_text(items: &mut Vec<Item>, alias: &str, text: &str) -> Result<bool, AppError>`(內容改變才回 true;wildcard alias 回 Err)
-  - `pub fn remove_host_block(items: &mut Vec<Item>, alias: &str) -> bool`(wildcard alias 一律 false)
+  - `pub fn blocks_of(items: &[Item]) -> Vec<HostBlockText>`(只取 `is_syncable_block` 的 Host 區塊)
+  - `pub fn validate_host_text(alias: &str, text: &str) -> Result<(), AppError>`(恰好一個 Host 區塊、第一個 pattern 等於 alias、所有 pattern 皆 syncable;A3 在合併前用它把壞記錄擋在快取外)
+  - `pub fn apply_host_text(items: &mut Vec<Item>, alias: &str, text: &str) -> Result<bool, AppError>`(內容改變才回 true;wildcard alias、本地同名區塊含 wildcard、文字不合法都回 Err)
+  - `pub fn remove_host_block(items: &mut Vec<Item>, alias: &str) -> bool`(wildcard alias 或本地區塊含 wildcard 一律 false)
 
 - [ ] **Step 1: 寫失敗的測試**
 
@@ -701,9 +703,28 @@ mod tests {
     }
 
     #[test]
+    fn ensure_include_moves_an_existing_include_to_the_top() {
+        // 舊版插法(最後一個 Include 之後)或使用者搬動過:搬到最頂端,其他行原封不動。
+        let (mut items, _) = parse_file("Include ~/.ssh/other.config\nInclude ~/.ssh/sshelter/hosts.config\nHost a\n");
+        assert!(ensure_include(&mut items));
+        assert_eq!(serialize_items(&items, true), format!("Include {INCLUDE_VALUE}\nInclude ~/.ssh/other.config\nHost a\n"));
+        assert!(!ensure_include(&mut items));
+        // 多路徑 Include:只抽走我們的 token,其他路徑留在原地。
+        let (mut items, _) = parse_file("# c\nAddKeysToAgent yes\nInclude ~/.ssh/a.config ~/.ssh/sshelter/hosts.config\nHost a\n");
+        assert!(ensure_include(&mut items));
+        assert_eq!(
+            serialize_items(&items, true),
+            format!("# c\nInclude {INCLUDE_VALUE}\nAddKeysToAgent yes\nInclude ~/.ssh/a.config\nHost a\n")
+        );
+        assert!(!ensure_include(&mut items));
+    }
+
+    #[test]
     fn wildcard_blocks_are_neither_extracted_nor_touched() {
         let (mut items, _) = parse_file(WITH_WILDCARD);
-        let aliases: Vec<&str> = blocks_of(&items).iter().map(|b| b.alias.as_str()).collect();
+        // 先綁定 blocks_of 的結果再借用,否則暫時 Vec 在敘述結束就釋放(E0716)。
+        let blocks = blocks_of(&items);
+        let aliases: Vec<&str> = blocks.iter().map(|b| b.alias.as_str()).collect();
         assert_eq!(aliases, vec!["web-1"]);
         // 遠端送來 wildcard alias 的記錄:拒絕、不套用。
         assert!(apply_host_text(&mut items, "*", "Host *\n  User root\n").is_err());
@@ -717,6 +738,22 @@ mod tests {
         assert!(!is_syncable_alias("!web"));
         assert!(!is_syncable_alias(""));
         assert!(is_syncable_alias("web-1"));
+        // 混合 pattern(`Host web *.internal`、`Host web !prod`):第一個 pattern 具名也不算,整個區塊本地。
+        assert!(!is_syncable_block(&["web".to_string(), "*.internal".to_string()]));
+        assert!(!is_syncable_block(&["web".to_string(), "!prod".to_string()]));
+        assert!(!is_syncable_block(&[]));
+        assert!(is_syncable_block(&["web".to_string(), "web.example.com".to_string()]));
+        const MIXED: &str = "Host web *.internal\n  User ops\n\nHost db\n  HostName 1\n";
+        let (mut items, _) = parse_file(MIXED);
+        let blocks = blocks_of(&items);
+        assert_eq!(blocks.iter().map(|b| b.alias.as_str()).collect::<Vec<_>>(), vec!["db"]);
+        // 遠端的 `web` 記錄不能替換、也不能在旁邊附加第二個 `Host web`;tombstone 也刪不到它。
+        assert!(apply_host_text(&mut items, "web", "Host web\n  User root\n").is_err());
+        assert!(!remove_host_block(&mut items, "web"));
+        assert_eq!(serialize_items(&items, true), MIXED);
+        // 遠端記錄的文字本身含 wildcard pattern:拒絕。
+        assert!(validate_host_text("web", "Host web *.internal\n").is_err());
+        assert!(validate_host_text("web", "Host web\n  User root\n").is_ok());
     }
 
     #[test]
@@ -749,6 +786,11 @@ mod tests {
         assert!(serialize_items(&items, true).ends_with("Host new\n  User root\n"));
         assert!(apply_host_text(&mut items, "bad", "# just a comment\n").is_err());
         assert!(apply_host_text(&mut items, "mismatch", "Host other\n").is_err());
+        // 同一套規則的純檢查(A3 在合併前用它):
+        assert!(validate_host_text("bad", "# just a comment\n").is_err());
+        assert!(validate_host_text("mismatch", "Host other\n").is_err());
+        assert!(validate_host_text("two", "Host two\nHost three\n").is_err());
+        assert!(validate_host_text("new", "Host new\n  User root\n").is_ok());
     }
 
     #[test]
@@ -806,30 +848,71 @@ fn sync_include_index(items: &[Item]) -> usize {
         .unwrap_or(items.len())
 }
 
-/// 主 config 若尚未 Include 受管檔,插在最頂端(見 `sync_include_index`)。
+/// 主 config 的同步 Include 必須在最頂端(見 `sync_include_index`):沒有就插入;已存在但不在
+/// 最頂端(舊版插法、使用者搬動)就搬上去 —— 多路徑的 `Include a b` 只抽走我們的 token。
+/// 回傳是否改了 items。
 pub fn ensure_include(items: &mut Vec<Item>) -> bool {
-    if items.iter().any(is_our_include) {
-        return false;
+    let top = sync_include_index(items);
+    match items.iter().position(is_our_include) {
+        Some(pos) if pos == top => false,
+        Some(pos) => {
+            let leftover: Vec<String> = match &items[pos] {
+                Item::Directive(d) => d
+                    .value
+                    .split_whitespace()
+                    .filter(|t| *t != INCLUDE_VALUE)
+                    .map(str::to_string)
+                    .collect(),
+                _ => Vec::new(),
+            };
+            if leftover.is_empty() {
+                items.remove(pos);
+            } else if let Item::Directive(d) = &mut items[pos] {
+                d.value = leftover.join(" ");
+                d.dirty = true;
+            }
+            // `pos > top`(Include 是 Directive,不可能在前導註解區裡),移除不影響 top。
+            items.insert(top, Item::Directive(Directive::new("Include", INCLUDE_VALUE, "")));
+            true
+        }
+        None => {
+            items.insert(top, Item::Directive(Directive::new("Include", INCLUDE_VALUE, "")));
+            true
+        }
     }
-    let idx = sync_include_index(items);
-    items.insert(idx, Item::Directive(Directive::new("Include", INCLUDE_VALUE, "")));
-    true
 }
 
-/// 具名主機才同步;含 wildcard/否定字元的 pattern(`Host *`、`Host *.internal`、`!x`)
-/// 是裝置本地的 config 結構 —— 不擷取、不套用、不刪除。
+/// 具名 pattern 才同步;含 wildcard/否定字元的 pattern(`*`、`*.internal`、`!x`)是裝置本地的 config 結構。
 pub fn is_syncable_alias(alias: &str) -> bool {
     !alias.is_empty() && !alias.contains(['*', '?', '!'])
 }
 
-/// 第一個 pattern 等於 `alias` 的 Host 區塊位置;wildcard alias 一律 None(連找都不找)。
-fn syncable_host_position(items: &[Item], alias: &str) -> Option<usize> {
-    if !is_syncable_alias(alias) {
-        return None;
+/// 整個區塊的同步資格:非空且**所有** pattern 都具名。`Host web *.internal` 的第一個 pattern 具名,
+/// 但它是 wildcard 規則的一部分 —— 整個區塊不擷取、不上傳、不遷入、不套用、不刪除。
+pub fn is_syncable_block(patterns: &[String]) -> bool {
+    !patterns.is_empty() && patterns.iter().all(|p| is_syncable_alias(p))
+}
+
+fn first_alias(item: &Item) -> Option<&str> {
+    match item {
+        Item::Host(h) => h.patterns.first().map(String::as_str),
+        _ => None,
     }
-    items
-        .iter()
-        .position(|i| matches!(i, Item::Host(h) if h.patterns.first().map(String::as_str) == Some(alias)))
+}
+
+/// 第一個 pattern 等於 `alias` 的具名 Host 區塊位置。alias 本身是 wildcard、或本地那個同名區塊含
+/// wildcard pattern(不能替換它、也不能在旁邊再附加一個 `Host alias`)→ Err;找不到 → Ok(None)。
+fn syncable_host_position(items: &[Item], alias: &str) -> Result<Option<usize>, AppError> {
+    if !is_syncable_alias(alias) {
+        return Err(AppError::Other(format!("'{alias}' is a wildcard pattern; wildcard blocks are never synced")));
+    }
+    match items.iter().position(|i| first_alias(i) == Some(alias)) {
+        Some(p) => match &items[p] {
+            Item::Host(h) if is_syncable_block(&h.patterns) => Ok(Some(p)),
+            _ => Err(AppError::Other(format!("local block '{alias}' has wildcard patterns and stays local"))),
+        },
+        None => Ok(None),
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -843,15 +926,15 @@ fn block_text(item: &Item) -> String {
     serialize_items(std::slice::from_ref(item), true)
 }
 
-/// 只取具名 Host 區塊;alias = 第一個 pattern。註解、空行、Match 與 wildcard 區塊一律略過。
+/// 只取可同步的 Host 區塊(`is_syncable_block`);alias = 第一個 pattern。註解、空行、Match 與
+/// 含 wildcard 的區塊一律略過。
 pub fn blocks_of(items: &[Item]) -> Vec<HostBlockText> {
     items
         .iter()
         .filter_map(|item| match item {
-            Item::Host(h) => h
+            Item::Host(h) if is_syncable_block(&h.patterns) => h
                 .patterns
                 .first()
-                .filter(|alias| is_syncable_alias(alias))
                 .map(|alias| HostBlockText { alias: alias.clone(), text: block_text(item) }),
             _ => None,
         })
@@ -868,18 +951,32 @@ fn parse_single_host(alias: &str, text: &str) -> Result<Item, AppError> {
         return Err(AppError::Other(format!("synced record for '{alias}' has more than one Host block")));
     }
     match &host {
-        Item::Host(h) if h.patterns.first().map(String::as_str) == Some(alias) => Ok(host),
-        _ => Err(AppError::Other(format!("synced record for '{alias}' names a different host"))),
+        Item::Host(h) if h.patterns.first().map(String::as_str) != Some(alias) => {
+            Err(AppError::Other(format!("synced record for '{alias}' names a different host")))
+        }
+        Item::Host(h) if !is_syncable_block(&h.patterns) => {
+            Err(AppError::Other(format!("synced record for '{alias}' contains wildcard patterns")))
+        }
+        _ => Ok(host),
     }
 }
 
-/// 以原始文字替換(或附加)一個具名 Host 區塊。回傳是否真的改了內容;wildcard alias 回 Err。
-pub fn apply_host_text(items: &mut Vec<Item>, alias: &str, text: &str) -> Result<bool, AppError> {
+/// `apply_host_text` 對文字的全部要求,拆成純檢查:恰好一個 Host 區塊、第一個 pattern 等於 alias、
+/// 所有 pattern 皆具名。A3 在合併前用它把壞掉的遠端記錄擋在快取外(否則套用失敗的記錄會在下一輪
+/// 被當成本機刪除而產生 tombstone)。
+pub fn validate_host_text(alias: &str, text: &str) -> Result<(), AppError> {
     if !is_syncable_alias(alias) {
         return Err(AppError::Other(format!("'{alias}' is a wildcard pattern; wildcard blocks are never synced")));
     }
+    parse_single_host(alias, text).map(|_| ())
+}
+
+/// 以原始文字替換(或附加)一個具名 Host 區塊。回傳是否真的改了內容;wildcard alias、本地同名區塊
+/// 含 wildcard、文字不合法都回 Err。
+pub fn apply_host_text(items: &mut Vec<Item>, alias: &str, text: &str) -> Result<bool, AppError> {
+    let pos = syncable_host_position(items, alias)?;
     let incoming = parse_single_host(alias, text)?;
-    match syncable_host_position(items, alias) {
+    match pos {
         Some(p) => {
             if block_text(&items[p]) == block_text(&incoming) {
                 return Ok(false);
@@ -894,14 +991,14 @@ pub fn apply_host_text(items: &mut Vec<Item>, alias: &str, text: &str) -> Result
     }
 }
 
-/// 移除一個具名 Host 區塊;wildcard alias 一律 false(tombstone 刪不到本地結構)。
+/// 移除一個具名 Host 區塊;wildcard alias 或本地區塊含 wildcard 一律 false(tombstone 刪不到本地結構)。
 pub fn remove_host_block(items: &mut Vec<Item>, alias: &str) -> bool {
     match syncable_host_position(items, alias) {
-        Some(p) => {
+        Ok(Some(p)) => {
             items.remove(p);
             true
         }
-        None => false,
+        _ => false,
     }
 }
 ```
@@ -916,7 +1013,7 @@ pub fn remove_host_block(items: &mut Vec<Item>, alias: &str) -> bool {
 - [ ] **Step 4: 執行測試確認通過**
 
 Run: `cd src-tauri && cargo test sync::hosts_file 2>&1 | tail -5`
-Expected: `8 passed`。
+Expected: `9 passed`。
 
 - [ ] **Step 5: Commit**
 
@@ -940,7 +1037,8 @@ git commit -m "feat(sync): managed hosts file block operations"
 - Produces:
   - `pub const STATE_VERSION: u32 = 1;`
   - `pub const DEFAULT_RELAY_URL: &str`(= `option_env!("SSHELTER_RELAY_URL")` 或 `"http://127.0.0.1:8787"`)
-  - `pub struct SyncState { pub version: u32, pub chain_id: Option<String>, pub device_id: String, pub device_name: String, pub relay_url: String, pub cursor_seq: u64, pub password_sync: bool, pub remote_schema_version: Option<u32>, pub records: BTreeMap<String, LocalRecord>, pub sealed: BTreeMap<String, Envelope>, pub last_sync_ms: Option<u64>, pub last_error: Option<String> }`
+  - `pub struct SyncState { pub version: u32, pub chain_id: Option<String>, pub device_id: String, pub device_name: String, pub relay_url: String, pub cursor_seq: u64, pub password_sync: bool, pub remote_schema_version: Option<u32>, pub baseline_established: bool, pub phrase_cleanup_pending: bool, pub records: BTreeMap<String, LocalRecord>, pub sealed: BTreeMap<String, Envelope>, pub last_sync_ms: Option<u64>, pub last_error: Option<String> }`
+    - `baseline_established`:剛 Create/Join 後為 false,A3 的基線輪成功後設 true(spec §6);`phrase_cleanup_pending`:Leave 時 keychain 刪不掉 → true(持久化,重啟後仍顯示重試)。
     - `records`:只放本版會處理的種類(host/device/meta)的明文快取;`sealed`(key = `"{kind}:{id_hash}"`):本版不處理的種類(key/password/未知)的原始密文 envelope,絕不解密。
   - `impl SyncState { pub fn fresh(device_name: &str) -> Result<Self, AppError>; pub fn joined(&self) -> bool; pub fn read_only(&self) -> bool }`(`read_only` = `remote_schema_version > SCHEMA_VERSION`)
   - `pub fn state_path() -> Result<PathBuf, AppError>`
@@ -1002,6 +1100,8 @@ mod tests {
         assert_eq!(s.version, STATE_VERSION);
         assert_eq!(s.relay_url, DEFAULT_RELAY_URL);
         assert!(s.sealed.is_empty());
+        assert!(!s.baseline_established);
+        assert!(!s.phrase_cleanup_pending);
     }
 
     #[test]
@@ -1106,6 +1206,12 @@ pub struct SyncState {
     /// chain 的 `meta.schema_version`(收到後持久化);比 `SCHEMA_VERSION` 新 → 唯讀模式。
     #[serde(default)]
     pub remote_schema_version: Option<u32>,
+    /// 剛 Create/Join 後 false:第一輪是「以 chain 為準」的基線輪,不做本機 diff(spec §6)。
+    #[serde(default)]
+    pub baseline_established: bool,
+    /// Leave 時 keychain 裡的助記詞刪不掉:持久化這個待辦,重啟後仍顯示警示與重試。
+    #[serde(default)]
+    pub phrase_cleanup_pending: bool,
     /// 明文快取,key = `record_key(kind, id)`;只放本版會處理的種類(host/device/meta)。
     pub records: BTreeMap<String, LocalRecord>,
     /// 本版不處理的種類(key/password/未知 kind)的原始密文 envelope,key = `"{kind}:{id_hash}"`。
@@ -1130,6 +1236,8 @@ impl SyncState {
             cursor_seq: 0,
             password_sync: false,
             remote_schema_version: None,
+            baseline_established: false,
+            phrase_cleanup_pending: false,
             records: BTreeMap::new(),
             sealed: BTreeMap::new(),
             last_sync_ms: None,
@@ -1368,7 +1476,12 @@ mod tests {
     #[test]
     fn validate_url_normalizes_without_building_a_client() {
         assert_eq!(RelayClient::validate_url(" https://relay.example.com/ ").unwrap(), "https://relay.example.com");
+        assert_eq!(RelayClient::validate_url("https://relay.example.com/prefix/").unwrap(), "https://relay.example.com/prefix");
         assert!(RelayClient::validate_url("http://relay.example.com").is_err());
+        // endpoint 用字串接在後面:query / fragment / userinfo 都拒絕。
+        assert!(RelayClient::validate_url("https://relay.example.com/#x").is_err());
+        assert!(RelayClient::validate_url("https://relay.example.com/?a=1").is_err());
+        assert!(RelayClient::validate_url("https://user:pw@relay.example.com").is_err());
     }
 }
 ```
@@ -1449,6 +1562,10 @@ impl RelayClient {
                 ))
             }
             _ => return Err(AppError::Other("relay URL must start with https://".to_string())),
+        }
+        // endpoint 是用字串接在 base 後面的:query/fragment 會把 `/v1/...` 吞掉,userinfo 沒有理由出現。
+        if url.query().is_some() || url.fragment().is_some() || !url.username().is_empty() || url.password().is_some() {
+            return Err(AppError::Other("relay URL must not contain a query, fragment or credentials".to_string()));
         }
         Ok(trimmed.to_string())
     }
