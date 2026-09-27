@@ -18,7 +18,7 @@
 - app 自己寫受管檔時,`note_file_written` 在**存檔當下**就產生 dirty 記錄(時間戳 = 存檔時間)、持久化並換 generation;引擎自己套用遠端效果的寫入以 `EngineWrite` 排除。同步輪次的本機 diff 只會抓到外部編輯,時間戳 = 檔案 mtime(整檔近似,spec 明示)。dirty 記錄在任何網路操作之前先持久化;心跳才用現在時間;重試沿用原版本/時間戳。
 - 剛 Join 的第一輪是**基線輪**(`baseline_established = false`;Create 直接 true):不做本機 diff,先 pull 並以 chain 為準套用(含移除 chain 上已 tombstone、本機卻還留著的區塊),成功後才設 true 並立刻再跑一輪。
 - 受管檔不變式(`check_managed_items`:只放具名、互不重複的 Host 區塊)在讀檔時檢查,違反就整輪停在讀檔階段(不 diff、不套用、不上傳)並顯示修正訊息。套用 + 發布是同一個交易(`apply_and_commit`,全程持 doc 鎖):比 generation → 比 gather 時的指紋(in-memory 與磁碟)→ 副本上套效果(**全有或全無**)→ 寫檔 → 發布。指紋不同就整輪丟棄(cursor 不前進)並立刻再跑一輪。持久化失敗先退回舊區塊、再從磁碟重載:磁碟內容若正是剛寫的(寫入其實已提交、只是讀指紋失敗)就照常發布,否則本輪作廢;重載也失敗就把 doc 作廢(`None`)並在放鎖後發 `sync://applied`。
-- `SyncCore { generation, state, keys, unsaved }` 在同一把鎖裡,永遠一起快照、一起替換;`apply_and_commit` 在 doc 鎖內比 generation 與指紋(**每次發布都比,不論有沒有效果**),`commit_state` 也比 generation。**每個換 generation 的路徑都先拿 doc 鎖**:lifecycle 換代、`mutate_state`(只動狀態的命令)、`note_file_written`(加入中的任何受管檔 app 寫入都換代,即使檔案違反不變式)。Create/Join/Leave 與改 relay URL 全程持有 lifecycle 鎖(含前置檢查、網路、keychain)。relay URL **只能在未加入時改**。同步錯誤只寫在產生它的 generation 上。狀態寫檔失敗記在 `unsaved`,下一輪在任何網路操作前先重存,失敗就停下。
+- `SyncCore { generation, state, keys, unsaved }` 在同一把鎖裡,永遠一起快照、一起替換;`apply_and_commit` 在 doc 鎖內比 generation 與指紋(**每次發布都比,不論有沒有效果**),`commit_state` 也比 generation。**每個換 generation 的路徑都先拿 doc 鎖**:lifecycle 換代、`mutate_state`(只動狀態的命令)、`note_file_written`(加入中的任何受管檔 app 寫入都換代,即使檔案違反不變式)。Create/Join/Leave 與改 relay URL 全程持有 lifecycle 鎖(含前置檢查、網路、keychain)。relay URL **只能在未加入時改**。同步錯誤只寫在產生它的 generation 上。狀態寫檔失敗記在 `unsaved`:每次 tick 先補存(不論是否加入中),補不成就不做任何網路操作;套用已寫檔但狀態沒存下時,tray 與 `sync://applied` 照樣發,再停下。Leave 的狀態寫檔失敗不中止 keychain 清理(沒有助記詞就派生不出金鑰,重啟也不會恢復同步)。
 - 持有 doc/core 時不呼叫會等主執行緒的 Tauri API(tray menu),不發事件;會等鎖、寫磁碟、讀 keychain 的 command 一律 async + `spawn_blocking`。
 - 遠端 host 記錄只有三種結果:`Upsert`(文字先通過 `hosts_file::validate_host_text`:只含一個 Host 區塊)/ `Delete`(只有驗證過的 `deleted = true`)/ 略過(**不進快取**);格式不支援、文字不合法或 wildcard **絕不**當成刪除。
 - 本版不處理的種類(key/password/未知)以原始 envelope 存進 `state.sealed`,不解密。
@@ -45,7 +45,8 @@
 13. 引擎自己套用遠端效果時寫檔 —— 存檔 hook 不能把它當成本機編輯重新上傳(Task 3 `engine_writes_are_flagged_only_inside_the_guard`)。
 14. 已加入時改 relay URL —— 必須被拒絕(cursor/seq 屬於原 relay)(Task 3 `sync_set_relay_url`;手動 smoke)。
 15. 同步執行緒正在套用遠端效果時,使用者在 UI 存一台主機(主執行緒上的同步 command 等 doc 鎖)—— 不得死鎖:tray 在放鎖之後才重建(Task 3 `apply_and_commit`;手動 smoke「同步中連續存檔」)。
-16. 存檔 hook 寫 `sync-state.json` 失敗(磁碟滿)—— 狀態列要顯示、下一輪在網路操作前先重存,不能在未落盤的狀態上 pull/push(Task 3 `unsaved`)。
+16. 存檔 hook 寫 `sync-state.json` 失敗(磁碟滿)—— 狀態列要顯示、下一輪在網路操作前先重存,不能在未落盤的狀態上 pull/push(Task 3 `unsaved`,`sync_once` 先補存)。Leave 時寫不進磁碟 —— 仍清 keychain、回報錯誤,重啟不得恢復同步。
+18. 遠端效果已寫進受管檔、但同步狀態存不下來 —— tray 與主機清單仍要更新(`Applied::Committed { save_error }`)。
 17. 寫檔成功但讀指紋失敗、重載成功 —— 視為已提交並發布合併狀態,下一輪不得把已套用的遠端內容當成本機修改(Task 3 `apply_and_commit` 的 `committed` 判斷)。
 
 ---
@@ -1449,8 +1450,9 @@ fn gather_blocks(app: &AppHandle, managed: &Path) -> Result<Gathered, AppError> 
 }
 
 enum Applied {
-    /// 效果已寫入(或沒有要寫的)、合併狀態已發布;`wrote` = 真的寫了檔案。
-    Committed { wrote: bool },
+    /// 效果已寫入(或沒有要寫的)、合併狀態已在記憶體發布;`wrote` = 真的寫了檔案;`save_error` = 狀態沒能寫進
+    /// 磁碟(`unsaved` 已標記,下一輪網路前重存)。檔案已經改了,所以 tray 與通知照樣要做,呼叫端之後才停下。
+    Committed { wrote: bool, save_error: Option<AppError> },
     /// 受管檔在 gather 之後變過(UI 存檔、外部編輯或 persist 的 Conflict):本輪作廢、立刻重跑。
     FileChanged,
 }
@@ -1535,20 +1537,21 @@ fn apply_and_commit(
             tray = doc_lock.as_ref().map(crate::tray::tray_aliases);
         }
     }
-    // 仍持有 doc 鎖:generation 在這段期間不可能變,再比一次當防線,然後發布合併狀態。
-    {
+    // 仍持有 doc 鎖:generation 在這段期間不可能變,再比一次當防線,然後發布合併狀態。記憶體裡的快取一定要
+    // 跟著檔案走(否則下一輪會把已套用的遠端內容當成本機修改);存檔失敗只標 `unsaved`,不撤回發布。
+    let save_error = {
         let mut core = state.sync.core.lock().unwrap();
         if core.generation != generation {
             return Err(superseded());
         }
         core.state = Some(next.clone());
-        save_core(&mut core)?;
-    }
+        save_core(&mut core).err()
+    };
     drop(doc_lock);
     if let Some(aliases) = tray {
         let _ = crate::tray::rebuild_tray(app, &aliases);
     }
-    Ok(Applied::Committed { wrote })
+    Ok(Applied::Committed { wrote, save_error })
 }
 
 fn save_state(app: &AppHandle) -> Result<(), AppError> {
@@ -1581,17 +1584,14 @@ fn commit_state(app: &AppHandle, generation: u64, s: &SyncState) -> Result<(), A
     save_core(&mut core)
 }
 
-/// 一輪(spec §6 的順序)。`generation`/`s`/`keys`/`unsaved` 是 `sync_once` 在同一把 core 鎖內取得的快照。
+/// 一輪(spec §6 的順序)。`generation`/`s`/`keys` 是 `sync_once` 在同一把 core 鎖內取得的快照(進來之前
+/// 狀態已確定落盤:`sync_once` 會先補存 `unsaved`,補不成就不跑)。
 /// 回 `SUPERSEDED` 表示被 lifecycle / 狀態命令 / 存檔當下的規劃搶先,不是錯誤。
-fn run_round(app: &AppHandle, generation: u64, mut s: SyncState, keys: ChainKeys, unsaved: bool) -> Result<(), AppError> {
+fn run_round(app: &AppHandle, generation: u64, mut s: SyncState, keys: ChainKeys) -> Result<(), AppError> {
     let managed = ensure_managed_loaded(app)?;
     let gathered = gather_blocks(app, &managed)?; // 含受管檔不變式檢查
     let now = now_ms();
     let platform = std::env::consts::OS;
-    if unsaved {
-        // 上次存狀態失敗(例如存檔 hook):任何網路操作前先重存,失敗就停下(spec §6:dirty 必須先落盤)。
-        commit_state(app, generation, &s)?;
-    }
     let relay = RelayClient::new(&s.relay_url, &keys.auth_token)?;
 
     // 0. 基線輪(剛 Join):不做本機 diff,以 chain 為準套用 —— chain 上已 tombstone、本機同步檔卻還
@@ -1603,10 +1603,15 @@ fn run_round(app: &AppHandle, generation: u64, mut s: SyncState, keys: ChainKeys
         next.baseline_established = true;
         next.last_sync_ms = Some(now);
         next.last_error = next.read_only().then(|| READ_ONLY_MESSAGE.to_string());
-        if let Applied::Committed { wrote: true } =
+        if let Applied::Committed { wrote, save_error } =
             apply_and_commit(app, &managed, generation, &gathered.fingerprint, &merged.host_effects, &next)?
         {
-            let _ = app.emit("sync://applied", &merged.host_effects.len());
+            if wrote {
+                let _ = app.emit("sync://applied", &merged.host_effects.len());
+            }
+            if let Some(e) = save_error {
+                return Err(e); // 狀態沒落盤:停下,下一輪先補存
+            }
         }
         wake();
         return Ok(());
@@ -1628,12 +1633,15 @@ fn run_round(app: &AppHandle, generation: u64, mut s: SyncState, keys: ChainKeys
             wake();
             return Ok(());
         }
-        Applied::Committed { wrote } => {
+        Applied::Committed { wrote, save_error } => {
             if wrote {
                 let _ = app.emit("sync://applied", &merged.host_effects.len());
             }
             if !merged.conflicts.is_empty() {
                 let _ = app.emit("sync://conflict", &merged.conflicts);
+            }
+            if let Some(e) = save_error {
+                return Err(e); // 不在未落盤的狀態上 push;下一輪先補存
             }
         }
     }
@@ -1659,17 +1667,22 @@ pub fn sync_once(app: &AppHandle) -> Result<(), AppError> {
     if state.sync.syncing.swap(true, Ordering::SeqCst) {
         return Ok(()); // 已在同步中
     }
-    // generation / 狀態 / 金鑰一次快照(同一把鎖):不可能拿到「新 generation + 舊狀態」。
-    let snapshot = {
-        let core = state.sync.core.lock().unwrap();
-        match (core.state.as_ref(), core.keys.as_ref()) {
-            (Some(s), Some(k)) if s.joined() => Some((core.generation, s.clone(), k.clone(), core.unsaved)),
+    // 先補存上次沒寫進磁碟的狀態 —— 不論是否加入中(例如 Leave 或未加入時改設定的存檔失敗)。
+    // 然後 generation / 狀態 / 金鑰一次快照(同一把鎖):不可能拿到「新 generation + 舊狀態」。
+    let (snapshot, save_error) = {
+        let mut core = state.sync.core.lock().unwrap();
+        let save_error = if core.unsaved { save_core(&mut core).err() } else { None };
+        let snapshot = match (core.state.as_ref(), core.keys.as_ref()) {
+            (Some(s), Some(k)) if s.joined() => Some((core.generation, s.clone(), k.clone())),
             _ => None,
-        }
+        };
+        (snapshot, save_error)
     };
-    let result = match snapshot {
-        Some((generation, s, keys, unsaved)) => run_round(app, generation, s, keys, unsaved).map_err(|e| (generation, e)),
-        None => Ok(()),
+    let result = match (snapshot, save_error) {
+        // 狀態還寫不進磁碟:不在未落盤的狀態上做任何網路操作(spec §6)。
+        (Some((generation, _, _)), Some(e)) => Err((generation, e)),
+        (Some((generation, s, keys)), None) => run_round(app, generation, s, keys).map_err(|e| (generation, e)),
+        (None, _) => Ok(()),
     };
     state.sync.syncing.store(false, Ordering::SeqCst);
     let outcome = match result {
@@ -1893,7 +1906,9 @@ fn leave_chain(app: &AppHandle, delete_remote: bool) -> Result<SyncStatus, AppEr
             s.last_sync_ms = None;
             s.last_error = None;
         }
-        save_core(&mut core)?;
+        // 寫檔失敗也不中止:下面照樣清 keychain —— 重啟時就算磁碟上的舊狀態還是 joined,沒有助記詞就派生不出
+        // 金鑰、不會恢復同步;`unsaved` 讓 worker 在儲存恢復後補寫「已離開」。錯誤在最後回報。
+        let _ = save_core(&mut core);
     }
     // keychain 清理(仍在 lifecycle 鎖內:新 Join 不可能穿插)。結果持久化,重啟後警示與重試入口仍在。
     let cleared = sync_state::clear_mnemonic();
@@ -1901,11 +1916,16 @@ fn leave_chain(app: &AppHandle, delete_remote: bool) -> Result<SyncStatus, AppEr
         s.phrase_cleanup_pending = cleared.is_err();
         Ok(())
     })?;
-    save_state(app)?;
+    let saved = save_state(app);
     emit_status(app);
     if let Err(e) = cleared {
         return Err(AppError::Other(format!(
             "left the sync chain, but the recovery phrase could not be removed from the keychain ({e}); use \"Remove phrase\" to retry"
+        )));
+    }
+    if let Err(e) = saved {
+        return Err(AppError::Other(format!(
+            "left the sync chain, but the sync state could not be saved ({e}); it will be retried automatically"
         )));
     }
     current_status(app)
@@ -2490,4 +2510,4 @@ git commit -m "feat(sync): migrate hosts into the synced file, detect and resolv
   - 持 doc/core 時不呼叫會等主執行緒的 Tauri API:`rebuild_tray` 在 `apply_and_commit` 放掉所有鎖後才呼叫;`emit` 一律在放鎖後(`emit_status` 先在鎖內組狀態)。會等鎖/寫檔/讀 keychain 的 command(`sync_show_words`、`sync_set_device_name`、`sync_forget_device` 與 lifecycle 四個)都在 `spawn_blocking` 裡,主執行緒上的同步 command 只剩 `sync_status`(只短暫鎖 core,而 core 從不在等主執行緒時被持有)與 `sync_now`。
 - **為何不寫交錯測試**:換代與套用的互斥是結構性的(上面的鎖清單),要在單元測試裡固定交錯需要 Tauri mock runtime;本計畫以逐路徑的鎖紀律審查 + 手動 smoke(同步期間 UI 存檔)涵蓋,final whole-branch review 需再核對一次。
 - **Review Focus 對應**:1 → Task 1 `timestamps_never_go_backwards` + `unchanged_block…bumps_version`;2 → Task 2 `undecryptable_envelopes_are_skipped_not_fatal`;3 → Task 2 `concurrent_edit_is_resolved…`;4 → Task 2 `cursor_only_follows_the_pull_watermark`;5 → Task 2 `push_conflict_is_deferred_to_the_next_round`;6 → Task 2 `unparseable_host_payload_is_skipped_not_deleted`;7 → Task 3 `apply_and_commit`(指紋雙重比對 + Conflict → FileChanged;手動 smoke);8 → Task 2 `pushes_are_batched_by_count`;9 → Task 2 `invalid_host_text_is_skipped_and_not_cached`;10 → Task 3 基線分支(手動 smoke);11 → Task 3 `note_file_written` + Task 1 `each_changed_block_carries_its_own_change_time`;12 → Task 3 `managed_file_must_hold_only_named_unique_hosts`;13 → Task 3 `engine_writes_are_flagged_only_inside_the_guard`;14 → Task 3 `sync_set_relay_url`(手動 smoke)。
-- **Codex review 已納入**:第一輪:cursor(5)、唯讀持久化與 sealed(6)、格式不支援不當成刪除(7)、離線 dirty 先持久化(8)、網路期間本機編輯(9)、Leave 覆蓋(10)、Join 用 GET(21)、E0502(22)、分批(23)、keychain 錯誤回報與持久化(24、M10)、blocking reqwest 進 spawn_blocking、shadowed 檔案定位(12)、`sync://applied`(25);第二輪:generation 守衛(H3)、基線輪(H4)、合併前驗證(H5)、mtime(M9)、持久化失敗還原(M8)、遷入拒絕 wildcard(M3);第三輪:`SyncCore` 原子快照(R3-H1)、lifecycle 鎖(R3-H2)、`refuse_wildcard` 與 `move_host` 同一定位規則(R3-H4)、持久化失敗先退回再重載(R3-M4);第四輪:套用 + 發布同一交易、所有換代路徑先拿 doc 鎖(R4-H1)、受管檔不變式 + 全有或全無取代「套不上的 alias 退回快取」(R4-H2、R3-H3、7、H5)、存檔當下規劃取代 `BlockTracker`(R4-M2、R4-M3、R3-M5、8、M9)、重載失敗就作廢 doc(R4-M4、R3-M4、M8)、relay URL 只在未加入時可改且持 lifecycle 鎖(R4-M5)、錯誤只寫在同一代(R4-L1);第五輪:tray 與事件移到放鎖之後、會等鎖的 command 改 async(R5-H1)、寫入已提交但讀指紋失敗時照常發布(R5-M1)、存檔 hook 的狀態寫入失敗以 `unsaved` 追蹤並在網路前重存(R5-M2)、每次發布都比指紋且加入中的任何受管檔寫入都換代(R5-M3)。
+- **Codex review 已納入**:第一輪:cursor(5)、唯讀持久化與 sealed(6)、格式不支援不當成刪除(7)、離線 dirty 先持久化(8)、網路期間本機編輯(9)、Leave 覆蓋(10)、Join 用 GET(21)、E0502(22)、分批(23)、keychain 錯誤回報與持久化(24、M10)、blocking reqwest 進 spawn_blocking、shadowed 檔案定位(12)、`sync://applied`(25);第二輪:generation 守衛(H3)、基線輪(H4)、合併前驗證(H5)、mtime(M9)、持久化失敗還原(M8)、遷入拒絕 wildcard(M3);第三輪:`SyncCore` 原子快照(R3-H1)、lifecycle 鎖(R3-H2)、`refuse_wildcard` 與 `move_host` 同一定位規則(R3-H4)、持久化失敗先退回再重載(R3-M4);第四輪:套用 + 發布同一交易、所有換代路徑先拿 doc 鎖(R4-H1)、受管檔不變式 + 全有或全無取代「套不上的 alias 退回快取」(R4-H2、R3-H3、7、H5)、存檔當下規劃取代 `BlockTracker`(R4-M2、R4-M3、R3-M5、8、M9)、重載失敗就作廢 doc(R4-M4、R3-M4、M8)、relay URL 只在未加入時可改且持 lifecycle 鎖(R4-M5)、錯誤只寫在同一代(R4-L1);第五輪:tray 與事件移到放鎖之後、會等鎖的 command 改 async(R5-H1)、寫入已提交但讀指紋失敗時照常發布(R5-M1)、存檔 hook 的狀態寫入失敗以 `unsaved` 追蹤並在網路前重存(R5-M2)、每次發布都比指紋且加入中的任何受管檔寫入都換代(R5-M3);第六輪(無 High):`unsaved` 補存移到 `sync_once` 開頭且不限加入中、Leave 存檔失敗不中止 keychain 清理(R6-M1)、狀態存檔失敗時已寫檔的 tray/通知照做(R6-M2)、spec 收窄「重啟不失真」為狀態成功落盤後(R6-L1)。依停止條件,A3 不再送 Codex,剩餘風險交給 task review 與 final review。

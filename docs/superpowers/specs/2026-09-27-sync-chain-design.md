@@ -182,11 +182,14 @@ API(全部 `Authorization: Bearer <token>`,JSON):
   cursor 不前進,錯誤顯示在狀態列,下一輪重試 —— 絕不在「部分套用」的狀態上前進 cursor。
 - **本機編輯的時間戳**:SSHelter 自己寫 `hosts.config`(任何 `persist_file`)時,`note_file_written`
   **在存檔當下**就做區塊 diff、產生 dirty 記錄(`updated_at_ms` = 存檔時間)並立刻持久化,同時
-  換 generation 讓在途輪次的舊快照作廢 —— 所以時間戳精確、重啟不失真,也不會把別的區塊較晚的
-  修改時間套到較早修改的區塊上。引擎自己套用遠端效果的寫入不算本機編輯(`EngineWrite`)。
+  換 generation 讓在途輪次的舊快照作廢 —— 所以時間戳精確,也不會把別的區塊較晚的修改時間套到
+  較早修改的區塊上;**同步狀態成功寫進磁碟之後**,重啟也保留這些時間。引擎自己套用遠端效果的寫入不算本機編輯(`EngineWrite`)。
   加入中的任何受管檔 app 寫入都換 generation,即使檔案被改成違反不變式(那次不規劃,下一輪停在
-  驗證錯誤)。狀態寫檔失敗時 SSH 檔照樣存成功,但狀態列顯示錯誤、記下 `unsaved`,下一輪在任何
-  網路操作前先重存,失敗就停下 —— 不在未落盤的狀態上 pull/push。
+  驗證錯誤)。狀態寫檔失敗時 SSH 檔照樣存成功,但狀態列顯示錯誤、記下 `unsaved`;每次 tick 先補存
+  (不論是否加入中),補不成就不做任何網路操作 —— 不在未落盤的狀態上 pull/push。**明示的限制**:
+  狀態一直寫不進磁碟就結束程式的話,重啟只剩磁碟上的舊狀態,那些編輯會以整檔 mtime 近似重新
+  規劃(與外部編輯相同)。套用遠端效果時若檔案已寫、狀態卻存不下,記憶體快取仍跟著檔案走(不撤回),
+  tray 與 `sync://applied` 照樣發,這一輪才停下。
   **外部編輯**(文字編輯器)只能由同步輪次發現,時間戳用檔案 mtime —— 整檔的近似值:同一次
   外部存檔裡改到的多個區塊會拿到同一個時間。這是明示的限制。
 - **一輪的順序**(每步可獨立失敗;失敗不影響前一步已持久化的結果):
@@ -251,7 +254,8 @@ API(全部 `Authorization: Bearer <token>`,JSON):
   驗證(`404` → 「no sync chain matches this recovery phrase」,不建鏈)→ 存助記詞 → 種下
   device 記錄。兩者都在 `spawn_blocking` 裡做網路。
 - Leave chain:先清 `sync-state.json` 的 chain 部分並持久化(確保停止同步)→ 再刪 keychain 的
-  助記詞。keychain 刪除失敗要**回報錯誤**、把 `phrase_cleanup_pending = true` **持久化到狀態檔**
+  助記詞。狀態寫檔失敗也照樣刪 keychain(磁碟上的舊狀態就算還是 joined,沒有助記詞就派生不出金鑰、
+  重啟不會恢復同步),錯誤回報給使用者,`unsaved` 讓背景自動補寫。keychain 刪除失敗要**回報錯誤**、把 `phrase_cleanup_pending = true` **持久化到狀態檔**
   (重啟後警示與重試入口仍在),狀態列顯示「recovery phrase still in keychain」與「Remove
   phrase」重試按鈕(再呼叫一次 `sync_leave_chain(false)`;未加入時它只重試 keychain 清理),
   不得宣稱已清乾淨。本機檔案全部保留。若是 chain 的最後
