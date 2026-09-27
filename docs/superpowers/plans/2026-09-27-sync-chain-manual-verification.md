@@ -50,3 +50,25 @@ entry all follow the OS user, so two processes in one account would fight over t
 16. Vanished synced file: while joined, quit A, delete `~/.ssh/sshelter/hosts.config`, start A → the
     synced hosts come back in hosts.config (restored from the chain) and B still has all of them
     (nothing was deleted on B).
+17. Upgrade safety: on a device that never opens Settings → Sync, upgrading from v0.15.1 leaves
+    `~/.ssh/config` byte-identical, creates no `~/.ssh/sshelter/`, shows no keychain prompt and makes
+    no request to the relay.
+18. No SSH config: on a machine without `~/.ssh/config`, Create/Join is refused with "SSHelter could
+    not load your SSH config…"; after creating an empty `~/.ssh/config` and reloading, Join works.
+19. Same-name hosts on Join: B already has `Host <alias>` for a host the chain syncs → after Join the
+    wizard does not list it, nothing is preselected, Move stays disabled until the first sync
+    finishes, and the shadow panel then offers "Keep as <alias>-local" / "Remove local".
+20. Two instances: start a second SSHelter process → it shows "Sync is running in another SSHelter
+    process…" and changes nothing; after quitting the first and restarting, sync works there.
+21. Bulk: move 60+ hosts at once → Status never shows a rate-limit (429) error and every host
+    reaches B.
+22. Deleted chain: leave on A with "Also delete the chain from the relay" → B shows "This sync chain
+    no longer exists on the relay… — leave it on this device".
+23. Sidebar: drag a host into and out of the Synced group → both sync to B; dragging a host whose
+    alias is already synced is refused.
+24. Emptied file: delete every line of A's hosts.config in a text editor → the hosts come back
+    (restored from the chain) and B keeps all of them.
+25. Release builds: with `SSHELTER_RELAY_URL` set, Settings → Sync shows that relay by default;
+    without it, the default is `http://127.0.0.1:8787`.
+26. macOS update: after installing a new version, any keychain prompt appears once; after allowing
+    it, sync resumes without re-entering the words.
