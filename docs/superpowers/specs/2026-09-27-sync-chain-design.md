@@ -171,12 +171,22 @@ API(全部 `Authorization: Bearer <token>`,JSON):
   `{ version, chain_id, device_id, device_name, relay_url, cursor_seq, password_sync,
   remote_schema_version, records: {明文快取,只有 host/device/meta}, sealed: {未處理種類的
   原始 envelope}, last_sync_ms, last_error }`。
-- 觸發:app 啟動、視窗取得焦點、每 45 秒、本地變更後立即。
+  內容讀不懂(損毀、較新版本寫的)→ 改名為同目錄的 `sync-state.unreadable-<ms>.json` 保留,以全新
+  狀態啟動並在狀態列顯示該檔名;讀取發生 I/O 錯誤 → 原檔不動,本次執行不寫狀態檔、也不做
+  Create/Join/Leave/設定變更(提示重啟)—— 暫時性的讀取錯誤不可讓裝置退出 chain,也不可讓新的
+  Create 覆蓋 keychain 裡舊 chain 的助記詞。
+- 觸發:app 啟動(前端第一次載入 config 之後;doc 還沒載入時的輪次安靜跳過,不記錯誤)、視窗取得
+  焦點、每 45 秒、本地變更後立即。
 - **基線輪**:剛 Join 的第一輪(`baseline_established = false`;Create 的 chain 是空的,建立時直接
   視為已建立基線)**不做本機 diff**,先 pull 並以 chain 為準套用 —— chain 上仍存在的區塊以 chain 版本覆蓋本機同名區塊;chain 上已
   tombstone、本機同步檔卻還留著的區塊被移除(`persist_file` 先備份);chain 不認識的區塊保留。
   成功後 `baseline_established = true` 並立刻再跑一輪,本機獨有的區塊才以新主機上傳。
   少了這一步,Leave 後保留的舊區塊會在重新加入時以「現在」的時間戳復活遠端的刪除。
+- **受管檔消失**:加入中、基線已建立、快取裡有主機記錄,受管檔卻不在了(被刪除、整個 `~/.ssh`
+  被換掉)→ **不**當成本機刪除所有主機(否則 tombstone 會推給每一台裝置)。引擎在 doc 鎖內丟掉
+  快取的 host 記錄(device/meta/sealed 保留)、`cursor_seq = 0`、`baseline_established = false`、
+  換 generation,**狀態存檔成功後**才重建空檔;下一輪是基線輪,以 chain 為準把主機寫回。狀態存不下
+  就不建檔,下一輪再偵測一次。要刪除同步主機請在 app 裡刪或 Leave;整檔消失一律視為意外。
 - **受管檔的不變式**:`hosts.config` 只放具名、互不重複的 Host 區塊(§3.1)。每輪讀檔時檢查
   (`check_managed_items`);違反(含 wildcard 的區塊、同一 alias 出現兩次)→ 整輪停在讀檔階段:
   不 diff、不 pull 套用、不 push,狀態列顯示要搬走/刪掉哪個區塊。因為這個不變式成立,遠端效果
