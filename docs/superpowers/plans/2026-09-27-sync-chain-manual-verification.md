@@ -69,7 +69,9 @@ entry all follow the OS user, so two processes in one account would fight over t
 24. Emptied file: delete every line of A's hosts.config in a text editor → the hosts come back
     (restored from the chain) and B keeps all of them.
 25. Release builds: with `SSHELTER_RELAY_URL` set, Settings → Sync shows that relay by default;
-    without it, the default is `http://127.0.0.1:8787`.
+    without it, Settings → Sync shows a required "Relay" section at the top, Create and Join stay
+    disabled until a relay URL is saved, and the release workflow only logs a notice. Debug builds
+    without the variable default to `http://127.0.0.1:8787`.
 26. macOS update: after installing a new version, any keychain prompt appears once; after allowing
     it, sync resumes without re-entering the words.
 27. Offline edit survives a vanished file: stop the relay, edit a synced host in A's UI, quit A,

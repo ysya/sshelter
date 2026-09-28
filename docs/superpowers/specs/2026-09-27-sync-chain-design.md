@@ -133,8 +133,12 @@
 ## 5. 中繼(relay)
 
 Cloudflare Worker + Durable Object(每 chain 一個 DO,SQLite storage 提供順序與原子性)。
-開源,repo 內 `relay/` 目錄,`wrangler deploy` 即自架;app 設定可改 relay URL,
-預設指向專案託管的 Worker。
+開源,repo 內 `relay/` 目錄,`wrangler deploy` 即自架;app 設定可改 relay URL。
+**兩種模式**:建置時注入 `SSHELTER_RELAY_URL`(release workflow 讀 repository variable)→ 預設指向
+那個託管的 Worker;沒注入 → release 建置**沒有內建中繼**(`DEFAULT_RELAY_URL` 為空字串),需要同步的
+使用者在 Settings → Sync 填入中繼網址,填好之前 Create/Join 停用、後端也拒絕;debug 建置沒注入時預設
+本機 `wrangler dev`(`http://127.0.0.1:8787`)。release workflow 在變數沒設時只留 notice,設了卻不是
+`https://` 才讓建置失敗。
 
 API(全部 `Authorization: Bearer <token>`,JSON):
 
@@ -312,7 +316,8 @@ API(全部 `Authorization: Bearer <token>`,JSON):
 
 - **Settings → Sync** pane(比照 McpPane 的輪詢/狀態模式):
   - 未加入:「Create sync chain」「Join with words」,以及 relay URL(進階)——自架或預設
-    中繼不可達時,**加入前**就要能改。
+    中繼不可達時,**加入前**就要能改。建置沒有內建中繼時,relay URL 改放在最上方的「Relay」區塊
+    (必填),填好之前 Create/Join 停用。
   - 建立後:顯示 24 詞 + 「I have saved these words」確認(並提醒存進密碼管理器)。這個確認
     畫面的 state 必須放在**不會因 `joined` 切換而卸載**的父層(pane 本身),否則建立成功的
     瞬間畫面就消失,無法保證使用者看過並確認。
