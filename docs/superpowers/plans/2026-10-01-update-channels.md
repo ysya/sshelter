@@ -13,6 +13,8 @@
 
 **Spec:** `docs/superpowers/specs/2026-10-01-update-channels-design.md`
 
+> **執行後註記(2026-10-01):** 最終審查後,`shouldReplace` 改為比較 `{ version, manifest }`(同版號內容不同也刷新),並新增 `validateManifest`、`updater-beta` 必須是 prerelease 的檢查、`beta-manifest.yml` 手動 workflow 與 `build-platform.yml` 拒絕 beta tag。本計畫保留原本的文字;以 spec 與 `scripts/beta-channel.mjs` 為準。
+
 ## Global Constraints
 
 - Stable 頻道的更新呼叫不變:`check()` → `update.downloadAndInstall()` → `relaunch()`,同樣的提示行為(同版本只提示一次、`busy` 防重入、toast id `sshelter-update`)。提示 toast 的程式可與 Beta 共用。
