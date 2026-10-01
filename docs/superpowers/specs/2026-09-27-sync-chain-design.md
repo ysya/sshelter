@@ -133,7 +133,9 @@
 ## 5. 中繼(relay)
 
 Cloudflare Worker + Durable Object(每 chain 一個 DO,SQLite storage 提供順序與原子性)。
-開源,repo 內 `relay/` 目錄,`wrangler deploy` 即自架;app 設定可改 relay URL。
+開源,repo 內 `relay/` 目錄,`wrangler deploy` 即自架;app 設定可改 relay URL。不用 Cloudflare 的自架:
+`relay/selfhost/` 以 Docker Compose 跑同一份 bundle(workerd + Durable Object 存在 volume,Caddy 提供 HTTPS 並以
+連線來源覆寫 `CF-Connecting-IP`)。
 **兩種模式**:建置時注入 `SSHELTER_RELAY_URL`(release workflow 讀 repository variable)→ 預設指向
 那個託管的 Worker;沒注入 → release 建置**沒有內建中繼**(`DEFAULT_RELAY_URL` 為空字串),需要同步的
 使用者在 Settings → Sync 填入中繼網址,填好之前 Create/Join 停用、後端也拒絕;debug 建置沒注入時預設
