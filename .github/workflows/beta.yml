@@ -1,38 +1,67 @@
-name: release
+name: publish beta
 
-# How releasing works:
-#  1. Every push to `main` runs release-please, which opens/updates a "release" PR that bumps
-#     the version across package.json + src-tauri/Cargo.toml + src-tauri/tauri.conf.json and
-#     regenerates CHANGELOG.md from Conventional Commits. (Reviewing/merging that PR is the gate.)
-#  2. Merging the release PR makes release-please create the GitHub Release + git tag.
-#  3. That gates the `build` job (same workflow — so it isn't blocked by the GITHUB_TOKEN
-#     "don't trigger other workflows" rule), which compiles installers on each platform and
-#     uploads them to the release created in step 2.
+# Publishes a beta for the Beta update channel (Settings → General → Update channel):
+#  1. `prepare` checks the version (X.Y.Z-N, newer than the current release) and creates the
+#     GitHub prerelease v<version> on this commit. Prereleases never become "latest", so the
+#     Stable channel (releases/latest/download/latest.json) never offers them.
+#  2. `build` stamps the version into the CI workspace only (scripts/set-app-version.mjs; nothing
+#     is committed), then builds and uploads the installers on every platform. Keep its steps in
+#     sync with the `build` job in release.yml.
+#  3. `beta-manifest` points the `updater-beta` release's latest.json at this beta.
 on:
-  push:
-    branches:
-      - main
   workflow_dispatch:
+    inputs:
+      version:
+        description: "Beta version X.Y.Z-N, newer than the current release (e.g. 0.16.1-1)"
+        required: true
+      notes:
+        description: "Release notes (optional)"
+        required: false
+        default: ""
 
 permissions:
   contents: write
-  pull-requests: write
+
+concurrency:
+  group: publish-beta
+  cancel-in-progress: false
 
 jobs:
-  release-please:
+  prepare:
     runs-on: ubuntu-latest
     outputs:
-      release_created: ${{ steps.rp.outputs.release_created }}
-      tag_name: ${{ steps.rp.outputs.tag_name }}
+      tag_name: ${{ steps.release.outputs.tag_name }}
     steps:
-      - uses: googleapis/release-please-action@v4
-        id: rp
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+          node-version: lts/*
+
+      - name: Check the version
+        env:
+          VERSION: ${{ inputs.version }}
+        run: node scripts/beta-channel.mjs check-version "$VERSION"
+
+      - name: Create the prerelease
+        id: release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          VERSION: ${{ inputs.version }}
+          NOTES: ${{ inputs.notes }}
+        run: |
+          if gh release view "v$VERSION" >/dev/null 2>&1; then
+            echo "::error::Release v$VERSION already exists."
+            exit 1
+          fi
+          gh release create "v$VERSION" --prerelease --target "$GITHUB_SHA" \
+            --title "v$VERSION (beta)" \
+            --notes "${NOTES:-Beta build for the Beta update channel (Settings → General → Update channel).}"
+          echo "tag_name=v$VERSION" >> "$GITHUB_OUTPUT"
 
   build:
-    needs: release-please
-    if: ${{ needs.release-please.outputs.release_created }}
+    needs: prepare
     permissions:
       contents: write
     strategy:
@@ -73,6 +102,12 @@ jobs:
           node-version: lts/*
           cache: pnpm
 
+      - name: Stamp the beta version (workspace only)
+        shell: bash
+        env:
+          VERSION: ${{ inputs.version }}
+        run: node scripts/set-app-version.mjs "$VERSION"
+
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -95,13 +130,13 @@ jobs:
           SSHELTER_RELAY_URL: ${{ vars.SSHELTER_RELAY_URL }}
         run: |
           if [ -z "$SSHELTER_RELAY_URL" ]; then
-            echo "::notice::SSHELTER_RELAY_URL is not set: this release has no built-in sync relay (users enter one in Settings → Sync)."
+            echo "::notice::SSHELTER_RELAY_URL is not set: this beta has no built-in sync relay (users enter one in Settings → Sync)."
           elif [[ "$SSHELTER_RELAY_URL" != https://* ]]; then
             echo "::error::SSHELTER_RELAY_URL must start with https:// (got '$SSHELTER_RELAY_URL')."
             exit 1
           fi
 
-      - name: Build and upload installers to the release
+      - name: Build and upload installers to the prerelease
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -112,20 +147,16 @@ jobs:
           # Built-in sync relay URL (repository variable; https:// only, checked above). When unset, the release has no built-in relay.
           SSHELTER_RELAY_URL: ${{ vars.SSHELTER_RELAY_URL }}
         with:
-          # The release already exists (created by release-please); attach assets to it by tag.
-          tagName: ${{ needs.release-please.outputs.tag_name }}
+          # The prerelease already exists (created by `prepare`); attach assets to it by tag.
+          tagName: ${{ needs.prepare.outputs.tag_name }}
           args: ${{ matrix.args }}
 
   beta-manifest:
-    # Offer this release on the Beta update channel too, unless the channel already points at a
-    # newer beta (scripts/beta-channel.mjs). Runs after every platform uploaded its artifacts, so
-    # the release's latest.json is complete; skipped when any build leg failed.
-    needs: [release-please, build]
-    if: ${{ needs.release-please.outputs.release_created }}
+    needs: [prepare, build]
     runs-on: ubuntu-latest
     permissions:
       contents: write
-    # Shared with beta.yml: manifest updates queue instead of racing.
+    # Shared with release.yml: manifest updates queue instead of racing.
     concurrency:
       group: updater-beta-manifest
       cancel-in-progress: false
@@ -140,5 +171,5 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
-          TAG_NAME: ${{ needs.release-please.outputs.tag_name }}
+          TAG_NAME: ${{ needs.prepare.outputs.tag_name }}
         run: node scripts/beta-channel.mjs update-manifest "$TAG_NAME"
