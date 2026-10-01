@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.17.0](https://github.com/ysya/sshelter/compare/v0.16.0...v0.17.0) (2026-10-01)
+
+
+### Features
+
+* **relay:** self-host with Docker Compose on workerd behind Caddy ([8f313e2](https://github.com/ysya/sshelter/commit/8f313e263e4e82d3622eb68ff369c1c4eb61462d))
+* **sidebar:** resize the sidebar by dragging its edge ([da31637](https://github.com/ysya/sshelter/commit/da316371cb9be55a9d7a0153119539b90303c289))
+* **sync:** offer a one-click relay deploy when no relay is set ([48fa754](https://github.com/ysya/sshelter/commit/48fa7548548c41193b8cc175e02d5ba7112e7f12))
+
 ## [0.16.0](https://github.com/ysya/sshelter/compare/v0.15.1...v0.16.0) (2026-10-01)
 
 
