@@ -53,6 +53,9 @@
 - **Beta**:改呼叫 Rust 指令,其餘 UX(同版本只提示一次、`busy` 防重入、toast id、錯誤處理)共用:
   - `updater_check_beta()` → `UpdateInfo | null`(`{ version, body }`);有新版就顯示同一個 toast。
   - 按「Install & restart」→ `updater_install_beta()` → 成功後 `relaunch()`。
+- 頻道一致性:檢查結束時若頻道已經換了,丟棄結果(不提示、也不顯示「up to date」);任何頻道變更
+  (Settings 切換或匯入設定)都關閉目前的更新提示,避免按鈕從剛離開的頻道安裝。頻道值先正規化,
+  非 `"beta"` 的值一律視為 Stable。
 
 Rust 新模組 `src-tauri/src/updater_channel.rs`:
 - `const BETA_ENDPOINT: &str = "https://github.com/ysya/sshelter/releases/download/updater-beta/latest.json";`
@@ -60,7 +63,8 @@ Rust 新模組 `src-tauri/src/updater_channel.rs`:
   `app.updater_builder().endpoints(vec![BETA_ENDPOINT 解析成 Url])?.build()?.check().await?`;
   有更新時把 `Update` 存進 managed state(`Mutex<Option<Update>>`),回傳 `UpdateInfo`(ts-rs 綁定)。
 - `updater_install_beta(app)`(async command):取出暫存的 `Update`,
-  `download_and_install(|_, _| {}, || {})`;沒有暫存的更新 → 錯誤「no update to install; check again」。
+  `download_and_install(|_, _| {}, || {})`;沒有暫存的更新 → 錯誤「no beta update is ready to install;
+  check for updates again」。
 - 版本比較、簽章驗證都沿用 updater plugin 的預設:只有遠端版本**大於**目前版本才算更新(不降版),
   簽章用 `tauri.conf.json` 裡的 pubkey 驗證。
 - 錯誤:自動(silent)檢查失敗只 `console.warn`(與現在一致,例如 `updater-beta` 尚未建立時);
@@ -78,15 +82,20 @@ Rust 新模組 `src-tauri/src/updater_channel.rs`:
 - 唯一的資產是 `latest.json`,永遠指向「目前最新的版本」—— beta 或正式版都算。
 - 不存在時由 4.2 的腳本自動建立。
 
-### 4.2 共用腳本 `scripts/update-beta-manifest.mjs`
-- 輸入:來源 release 的 tag(例如 `v0.16.0`、`v0.16.1-1`)。
-- 流程:用 `gh` 下載來源 release 的 `latest.json` → 下載 `updater-beta` 目前的 `latest.json`
-  (不存在視為空)→ 新版本**大於**目前版本(或目前為空)才 `gh release upload updater-beta
-  latest.json --clobber`,否則記錄「skip」並成功結束。
+### 4.2 共用腳本 `scripts/beta-channel.mjs`
+- 兩個子命令:`check-version <version>`(4.4 的版號檢查)與 `update-manifest <source-tag>`(清單更新)。
+  任何 `gh` 錯誤都讓 job 失敗(fail closed),不會被當成「沒有清單」。
+- `update-manifest` 流程:用 `gh` 下載來源 release 的 `latest.json` 並**先驗證**(版本等於 tag 的版本;
+  `platforms` 至少各有一個以 `linux-x86_64`、`linux-aarch64`、`windows-x86_64`、`darwin-` 開頭的鍵,
+  以前綴比對容許 tauri-action 的安裝器專用鍵)→ 讀 `updater-beta` 目前的 `latest.json`(不存在視為空;
+  `updater-beta` 存在卻不是 prerelease 就失敗,避免 `releases/latest` 把 Beta 清單送給 Stable)→
+  符合下列任一條才 `gh release upload updater-beta latest.json --clobber`:目前為空、新版本**大於**目前版本、
+  或版本相同但清單內容不同(同一版號被重建或重發時簽章會變,來源 release 才是該版本的依據)。較舊的來源
+  不覆寫,並以 `::warning::` 顯示在 run summary。`--clobber` 上傳失敗時盡力把原本的清單放回去再失敗。
 - 版本比較 `compareVersions(a, b)`:接受 `X.Y.Z` 與 `X.Y.Z-N`(N 為數字);同一個 `X.Y.Z` 時
   正式版大於任何 pre-release;`-N` 依數字比較;其他格式丟錯(讓 workflow 失敗而不是亂寫清單)。
-- 版本比較與「要不要覆寫」的決定寫成可匯入的純函式,附 vitest 單元測試。
-- 呼叫這支腳本的 job(4.3、4.4)都設 `permissions: contents: write`,並共用跨 workflow 的
+- 版本比較、要不要覆寫、清單驗證都寫成可匯入的純函式,附 vitest 單元測試。
+- 呼叫這支腳本的 job(4.3、4.4、4.5)都設 `permissions: contents: write`,並共用跨 workflow 的
   `concurrency: { group: updater-beta-manifest, cancel-in-progress: false }`:正式版與 beta 的清單
   更新若同時發生,會排隊執行,不會出現「較舊的版本最後寫入」把 Beta 頻道蓋回去。
 
@@ -100,9 +109,11 @@ Rust 新模組 `src-tauri/src/updater_channel.rs`:
 - 觸發:`workflow_dispatch`,輸入 `version`(必填)、`notes`(選填)。
 - `concurrency`:同一時間只跑一個 beta 發布。
 - job `prepare`(ubuntu):
-  1. `version` 必須符合 `^\d+\.\d+\.\d+-\d+$`。
+  1. `version` 必須符合 `^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)-(0|[1-9]\d*)$`(不接受前導零、`v` 前綴、
+     空白),且符合 Windows MSI 的上限:major、minor ≤ 255,patch 與 `-N` ≤ 65535。
   2. `version` 必須大於 `.release-please-manifest.json` 的正式版版本(用 4.2 的比較函式)。
-  3. tag `v<version>` 不得已存在。
+  3. release `v<version>` 與 tag `v<version>` 都不得已存在(tag 用 `git ls-remote --exit-code` 檢查,
+     只有確定不存在才繼續;連線失敗等其他狀況一律拒絕)。
   4. `gh release create v<version> --prerelease --target <當下 commit> --title "v<version> (beta)"`,
      說明用 `notes` 或預設文字。先建立 release,四個平台再掛上檔案(與正式版相同模式,避免
      多個平台同時建立 release)。
@@ -112,9 +123,17 @@ Rust 新模組 `src-tauri/src/updater_channel.rs`:
      `package.json` 的 `version` 改成 `<version>`(不 commit 回 `main`;release-please 的版本管理不受影響)。
   3. 與 `release.yml` 相同的相依安裝、簽章金鑰(`TAURI_SIGNING_PRIVATE_KEY`)、`SSHELTER_RELAY_URL`。
   4. `tauri-action` 以 `tagName: v<version>` 把安裝檔與該 release 的 `latest.json` 掛上去。
-- job `beta-manifest`:`needs: build`,以 `v<version>` 呼叫 4.2 的腳本。
+- job `beta-manifest`:`needs: [prepare, build]`,以 `v<version>` 呼叫 4.2 的腳本。
+- tauri-action 另傳 `prerelease: true`(防止日後更新 release 時把旗標改掉)。
 - 已知取捨:beta tag 指向的 commit 裡,版本檔仍是正式版的版本號;實際安裝檔與 app 回報的版本
   是 beta 版號(CI 修改)。
+
+### 4.5 手動修復與既有的 `build-platform.yml`
+- 新 workflow `.github/workflows/beta-manifest.yml`(「update beta channel」,`workflow_dispatch`,輸入 `tag`):
+  以指定 tag 呼叫 `update-manifest`,共用 `updater-beta-manifest` concurrency group。用於正式版某個平台
+  以 `build-platform.yml` 補建後、或清單 job 被取消/跳過時。
+- `build-platform.yml` 拒絕含 `-` 的 tag:beta 的平台失敗要在「publish beta」那次 run 用
+  「Re-run failed jobs」重跑(它會帶版號戳記並更新清單)。
 
 ## 5. 發版順序
 
@@ -138,7 +157,10 @@ Rust 新模組 `src-tauri/src/updater_channel.rs`:
 | 多個平台同時更新 `latest.json` 互相覆寫 | `beta-manifest` 在四個平台都完成後才執行 |
 | beta 被正式版使用者收到 | beta 是 prerelease,GitHub `latest` 不含 prerelease;Stable 只讀 `latest` |
 | 較舊的正式版把 Beta 頻道蓋回去 | 腳本只在版本較新時覆寫;正式版與 beta 的清單 job 共用 concurrency group,排隊執行 |
-| Windows MSI 不接受非數字 pre-release | 版本號格式驗證 `X.Y.Z-N` |
+| Windows MSI 不接受非數字 pre-release | 版本號格式驗證 `X.Y.Z-N`(無前導零)與 MSI 欄位上限,都在建立 release 之前 |
+| 頻道切換時,舊頻道的檢查結果或提示仍可安裝 | 檢查結束後頻道已不同就丟棄結果;任何頻道變更(含匯入設定)都關閉更新提示 |
+| 同一版號重建後,Beta 清單留著舊簽章 | 版本相同但清單內容不同時刷新 |
+| 殘留的 beta tag 讓 release 指向舊 commit | `prepare` 也拒絕已存在的 tag(檢查失敗即拒絕) |
 | release-please 的 `prerelease: true` 讓所有 0.x 變 prerelease | 不使用該設定;beta 由獨立 workflow 發布 |
 | beta 期間切回 Stable | 不降版,停在 beta 版號,直到更新的正式版出來 |
 
@@ -146,14 +168,21 @@ Rust 新模組 `src-tauri/src/updater_channel.rs`:
 
 - **單元測試**
   - `compareVersions` / 覆寫決定(vitest):`0.16.1-1 < 0.16.1`、`0.16.1-2 > 0.16.1-1`、
-    `0.16.10 > 0.16.9`、較舊正式版不覆寫較新的 beta、非法格式丟錯。
+    `0.16.10 > 0.16.9`、較舊正式版不覆寫較新的 beta、非法格式丟錯;同版號內容相同不覆寫、
+    簽章改變則刷新。
+  - 清單與版號(vitest):`validateManifest`(版本不符、缺平台、安裝器專用鍵)、`updater-beta` 不是
+    prerelease 就拒絕、`check-version`(前導零、`v` 前綴、空白、MSI 上限與剛好在上限)、
+    `set-app-version.mjs` 只改 `[package]` 的版本。
   - Rust:`BETA_ENDPOINT` 能解析成合法 `Url`;沒有暫存更新時 `updater_install_beta` 回錯誤
     (以純函式或暫存狀態的單元測試涵蓋)。
-  - 前端:`updateChannel` 預設為 `"stable"`。
+  - 前端:`updateChannel` 預設為 `"stable"`;Stable 只呼叫 updater plugin、Beta 只呼叫兩個 Rust 指令
+    (記錄 IPC 指令名稱);檢查中切換頻道會丟棄結果;頻道變更關閉提示,無關設定變更不關閉。
 - **發版前手動**:第 5 節第 1 步的 dev 版檢查。
 - **首次 beta**:切到 Beta 的機器提示更新;暫時切回 Stable 的機器不提示。
 
 ## 8. 文件
 
 - README:Updates 段落補上更新頻道;說明 Sync 是 beta、需要自行部署 relay(0.16.0 不內建)。
-- 新增發 beta 的說明(維護者用):Actions →「Publish beta」→ 輸入 `X.Y.Z-N`。
+- 新增發 beta 的說明(維護者用):Actions →「Publish beta」→ 輸入 `X.Y.Z-N`;平台失敗用
+  「Re-run failed jobs」、不要用 `build-platform.yml`;重發同一版號要先刪 prerelease 與 tag;
+  手動修復用「update beta channel」。
