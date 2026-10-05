@@ -16,6 +16,9 @@ SP4。本文取代那個規劃:
   pipe。
 - **私鑰同步從 SP4 提前到本文**,改成每把金鑰由使用者在它所在的電腦上決定。SP4 只剩「把 space 分享給別人」。
 
+2026-10-05 定下的路線(§14):本文(金鑰插槽)→ SSHelter 自己的 SSH agent → 內建終端機(可選)。後兩者各自另寫 spec;
+本文的資料格式與插槽路徑要讓 agent 階段直接沿用。
+
 ## 1. 目標與非目標
 
 **目標**
@@ -298,3 +301,24 @@ key_slots: { <slot id>: { file_name,
   credential、Tabby 的 ssh-keymap 外掛、1Password 讓 `IdentityFile` 指向 `.pub` 再由 agent 提供私鑰。
   - https://github.com/mathys-lopinto/tabby-ssh-keymap
   - https://www.1password.dev/ssh/agent/advanced
+
+## 14. 後續階段(2026-10-05 決定,各自另寫 spec)
+
+1. **本文:金鑰插槽。** 先讓同步的主機在每台電腦上都能連線。使用者若選「Keep on this computer」,沒有私鑰離開電腦。
+2. **SSHelter 自己的 SSH agent。**
+   - 金鑰放進 SSHelter 的保管庫,用同一條帳戶 chain 加密同步(沿用本文的 `keyslot`、`key` 記錄)。
+   - SSHelter 提供 agent(Unix socket;Windows named pipe),每次使用都要核准。
+   - 插槽只放 `.pub`,主機的 `IdentityFile` 不變,每台電腦的本機設定加上 `IdentityAgent`。
+   - MCP 的 `run` 也走這個 agent。私鑰只在 SSHelter 手裡時,電腦上的其他程式(包括 AI 工具)不經 SSHelter 核准就用不了
+     這些金鑰;現在的 MCP 核准擋不住其他程式直接執行 `ssh`(README「AI Access (MCP)」)。
+   - 代價:SSHelter 沒在執行時,這些金鑰無法使用;要處理 Windows 上系統 agent 的 pipe。
+3. **內建終端機(可選)。** 用 xterm.js 加上 SSHelter 自己的 SSH 連線,直接用 agent 的金鑰。Ghostty 的圖形介面目前沒有
+   Windows 版;可以嵌入的 `libghostty-vt` 只負責解析與畫面狀態,繪製要自己做(查證於 2026-10-05)。
+   - https://mitchellh.com/writing/libghostty-is-coming
+   - https://github.com/ghostty-org/ghostty/discussions/2563
+
+**本文要為第 2 階段保留的條件**
+- `keyslot`/`key` 記錄只描述金鑰本身,不寫死「落地成檔案」:第 2 階段加一個「由 agent 提供」的交付方式時,
+  資料格式不需要改。
+- 主機的 `IdentityFile` 一律指到插槽路徑;第 2 階段把插槽檔換成 `.pub`(OpenSSH 會依 `.pub` 向 agent 要對應的私鑰)。
+
