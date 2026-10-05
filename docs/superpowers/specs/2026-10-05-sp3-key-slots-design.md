@@ -76,11 +76,15 @@ SP4。本文取代那個規劃:
 
 - `name`:`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`,不得以 `.pub` 結尾。預設取金鑰的檔名,不合規的字元換成 `-`,去掉頭尾 `-`;
   結果是空字串時用 `key`。
-- `device` payload 加上 `keys: Vec<{ slot_id, fingerprint, synced_copy }>`(serde default 空):這台的插槽裡目前是哪把金鑰,
-  以及它是不是同步來的副本。用來在 Keys 對話框顯示每台電腦的狀態,以及停止同步時列出還有副本的電腦。只含公開資訊;
-  每台只寫自己的 `device` 記錄,所以舊版電腦改寫自己的記錄時不會影響別台的 `keys`。
+- `device` payload 加上 `slots: Vec<{ slot_id, fingerprint, synced_copy }>`(serde default 空,空時不寫出):這台的插槽裡
+  目前是哪把金鑰,以及它是不是同步來的副本。用來在 Keys 對話框顯示每台電腦的狀態,以及停止同步時列出還有副本的電腦。
+  只含公開資訊;每台只寫自己的 `device` 記錄,所以舊版電腦改寫自己的記錄時不會影響別台的 `slots`。
+  **不能沿用既有的 `keys` 欄位**:SP1 的 `DevicePayload.keys` 是 `Vec<String>`(一律寫空),SP1 電腦讀到物件陣列會解析失敗,
+  而 `valid_account_record` 會把整筆 `device` 記錄丟掉。
 - 舊版(SP1)的 `merge_account` 只解開 `device`、`meta`、`space`、`spacekey`,其他種類以密文原樣存進 `sealed`
   (`sync/merge.rs`):`keyslot` 與 `key` 在舊版電腦上會被保留,不處理、不刪除。
+- SP3 的合併:`keyslot` 解開進 `records`,照一般記錄做 LWW。`key` 存在 `sealed`,但和 `spacekey` 一樣在記憶體解開比較
+  (`record::merge`),本機較新的不被拉到的舊版本蓋掉;relay 回滾時也和 `spacekey` 一樣重設。
 - 大小:relay 每筆密文上限 65,536 字元(約 49 KB 明文,`relay/src/index.ts`)。`private_key` 超過 16 KiB 的金鑰不提供同步
   (RSA 4096 的私鑰約 3.3 KB)。
 
@@ -134,7 +138,7 @@ key_slots: { <slot id>: { file_name,
 2. 寫入 `keyslot`(`mode` 依使用者的選擇);選「Sync key」時同時寫入 `key`。
 3. 建立本機插槽(連結到原檔)與 `.pub`,寫入 `key_slots`。
 4. 改寫主機(§5)。插槽檔一定先就位,主機才改寫,所以改寫後的主機立刻能用。
-5. 更新這台的 `device.keys`。
+5. 更新這台的 `device.slots`。
 
 ### 6.2 接收(其他電腦)
 
@@ -159,7 +163,7 @@ key_slots: { <slot id>: { file_name,
 
 ### 6.4 落地之後
 
-更新 `key_slots` 與這台的 `device.keys`。
+更新 `key_slots` 與這台的 `device.slots`。
 
 ### 6.5 指紋檢查
 
@@ -205,7 +209,7 @@ key_slots: { <slot id>: { file_name,
 新增「Keys used by synced hosts」區塊,每個插槽一列:
 
 - 名稱;`synced` 的顯示指紋,`own` 的顯示「Each computer uses its own key」;用到它的主機數;
-- 這台電腦用的檔案與狀態;各台電腦的狀態(來自 `device.keys`);
+- 這台電腦用的檔案與狀態;各台電腦的狀態(來自 `device.slots`);
 - 動作:Sync this key、Stop syncing、Pick a key on this computer、Change、Delete(只對 Not in use 的副本)。
 - 「Pick a key on this computer」列出這台 `~/.ssh` 裡的私鑰(Keys 對話框現有的清單),也可以選其他位置的檔案。
 
