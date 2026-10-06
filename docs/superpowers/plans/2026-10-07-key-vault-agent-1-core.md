@@ -671,7 +671,7 @@ Facts from the crate spike (spec §15), which this task relies on:
 
 - [ ] **Step 1: Add the dependencies**
 
-In `src-tauri/Cargo.toml` `[dependencies]`, add:
+In `src-tauri/Cargo.toml` `[dependencies]`, change `sha2 = "0.10"` to `sha2 = { version = "0.10", features = ["oid"] }` (`rsa::pkcs1v15::SigningKey<Sha256/Sha512>` needs the digest's OID, as in the spike), and add:
 
 ```toml
 ssh-key = { version = "0.6.7", features = ["crypto", "encryption"] }
@@ -682,7 +682,7 @@ rand_core = { version = "0.6", features = ["getrandom"] }
 signature = "2"
 ```
 
-Run `PATH=$HOME/.rustup/toolchains/stable-aarch64-apple-darwin/bin:$PATH cargo fetch` once from `src-tauri/` (the crates are in the local registry cache from the spike; the fetch only resolves the lockfile).
+The crates are in the local registry cache from the crate spike (`agent-crate-spike/Cargo.toml` in the session scratchpad used the same versions, plus ssh-key's `getrandom` feature — add it only if the compiler asks for it). Resolve offline: the first `cargo test --offline …` updates `Cargo.lock`. Do not run a networked `cargo fetch` or `cargo update`; if offline resolution fails, stop and report.
 
 - [ ] **Step 2: Add an RSA test key**
 
