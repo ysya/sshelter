@@ -332,8 +332,10 @@
 
 一份 spec,分三份計畫(同 Sync v2):
 
-1. 保管庫與 agent 核心:保管庫檔、agent 協定、socket/pipe、核准規則與快取、passphrase、程式辨識、`agent/config` 與 Include、Connect。
-2. Keychain 頁、核准視窗、主機編輯器挑金鑰、Export to host、搬遷、`keyprefs`。
+1. 保管庫與 agent 核心:保管庫檔、agent 協定、socket/pipe、核准規則與快取、核准視窗、passphrase、程式辨識、`agent/config` 與 Include、
+   Connect,以及現有「Keys used by synced hosts」裡每個同步插槽的「Only in SSHelter」切換。做完就能實際試用:把一把同步的金鑰改成只在
+   SSHelter,從終端機 `ssh`,看到核准視窗。
+2. Keychain 頁、主機編輯器挑金鑰、Export to host、新增與匯入(搬進來或保留檔案)、搬遷、`keyprefs`。
 3. 移除 MCP `run`、文件、平台收尾(Windows、Touch ID/Windows Hello、鎖定偵測、隱藏啟動)。
 
 ## 15. 查證紀錄
