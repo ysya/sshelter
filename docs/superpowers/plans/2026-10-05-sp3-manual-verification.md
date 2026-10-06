@@ -19,21 +19,26 @@ Windows 暫時留在 0.17.0-4。
    全部挑完之後,Settings → Sync 沒有殘留的提示。
 5. **搬進 space**(Mac):把一台用 `~/.ssh/id_mac` 的本機主機用「Move to file」搬進 Personal → 不再詢問(這把金鑰已經有插槽),
    主機改指到同一個插槽。
-6. **本機挑的優先**:Mac 在 Keys 對話框對 4 的插槽按「Sync this key」→ Windows 的插槽不被換掉,Keys 對話框顯示
+6. **本機挑的優先**:Mac 在 Keys 對話框對 4 的插槽按「Sync this key」→ 先跳出確認「Sync id_mac2 to your other computers?」,
+   說明這把金鑰有沒有 passphrase(沒有時是「No passphrase — your sync code and every joined computer can use this key once it syncs.」);
+   按「Cancel」什麼都不變,再按一次、按「Sync key」→ Windows 的插槽不被換掉,Keys 對話框顯示
    「A synced key is available」→「Use the synced key」→ 插槽換成同步的金鑰;`id_win` 沒被動到。
 7. **Stop syncing**(Mac):對 2 的插槽按「Stop syncing」→ toast「id_mac no longer syncs; computers that have it keep their copy」;
    Windows 的副本仍在、`ssh web` 照樣連得上。
-8. **刪除副本**:Mac 把用 2 的插槽的主機(`web` 與 5 搬進來的那台)都改成不用插槽 → Windows 的 Keys 對話框顯示「Not in use」→
-   「Delete copy」→ 確認 → 檔案刪除。
+8. **刪除副本**:Mac 在編輯器把用 2 的插槽的兩台主機(`web` 與 5 搬進來的那台)的 `IdentityFile` 那一行刪掉(或停用成註解)並儲存。
+   不要改回 `~/.ssh/id_mac`:那樣「Keys used by synced hosts」會自動沿用同一個插槽,又把那一行改寫回插槽路徑。→ Windows 同步之後,
+   Keys 對話框顯示「Not in use」→「Delete copy」→ 確認對話框說「The copy of id_mac on this computer is deleted. Other computers aren't
+   affected.」→「Delete copy」→ 檔案刪除。
 9. **金鑰換了**(只看狀態;伺服器換上新公鑰之前 `api` 連不上):Mac 用 `ssh-keygen -f ~/.ssh/id_mac2` 重新產生 6 已改成同步的
    那把金鑰,切回 app → Keys 對話框顯示
-   「This computer's key changed — your other computers still have the previous one」→「Sync the new key」→ Windows 顯示
+   「This computer's key changed — your other computers still have the previous one」→「Sync the new key」→ 確認對話框說明的是
+   新產生的那把有沒有 passphrase →「Sync key」→ Windows 顯示
    「A synced key is available」→「Use the synced key」→ 舊的副本留成 `<file>.previous-xxxxxxxx`。
 10. **擋路的檔案**:Mac 先用 `ssh-keygen` 產生 `~/.ssh/id_mac3`,在 Personal 新增主機 `blocked`,在編輯器加上
     `IdentityFile ~/.ssh/id_mac3` 並儲存 → 對話框 →「Keep on this computer」,建立一個新插槽。Windows 同步之後跳出
     「Keys for this computer」,按「Done」略過(不要挑金鑰:挑了,插槽路徑上就是那把金鑰的連結,不會被擋);Windows 在那個插槽路徑
-    (`blocked` 的 `IdentityFile`,`%USERPROFILE%\.ssh\sshelter\keys\id_mac3-xxxxxxxx`)放一個自己的檔案;Mac 改成
-    「Sync this key」→ Windows 的 Keys 對話框顯示「A file SSHelter didn't create is in the way: … Move it, then sync again.」,
+    (`blocked` 的 `IdentityFile`,`%USERPROFILE%\.ssh\sshelter\keys\id_mac3-xxxxxxxx`)放一個自己的檔案;Mac 按
+    「Sync this key」、在確認對話框按「Sync key」→ Windows 的 Keys 對話框顯示「A file SSHelter didn't create is in the way: … Move it, then sync again.」,
     檔案沒被改。移走之後下一輪落地。
 11. **更換同步碼**(Mac):確認對話框多一條「Keys you synced stay on every computer that has them. …」;完成畫面顯示「If a computer
     was lost, also replace these synced keys on your servers: …」。Windows 以新同步碼重新加入後,插槽與副本都在。
@@ -46,7 +51,10 @@ Windows 暫時留在 0.17.0-4。
     「This key isn't in the OpenSSH format, … Convert it with ssh-keygen -p -f <file>, or keep it on this computer.」;
     「Keep on this computer」照常可用。
 16. **從 Settings 開對話框**:16 到 18 兩台都要在帳戶裡(Windows 在 12 離開了:用 Mac 的 Account → Sync code → Show 看到的
-    同步碼重新加入、勾選 Personal,等第一輪同步完成)。Mac 先用 `ssh-keygen` 產生 `~/.ssh/id_mac4` 與 `~/.ssh/id_mac5`,
+    同步碼重新加入)。重新加入之後、勾選 Personal 之前(先不勾,按一次 Sync now):12 搬到 `sshelter-local\` 的主機還用著那些插槽,
+    `ssh api` 照樣連得上;Keys 對話框裡 `id_mac2`、`id_mac3` 的插槽是「Ready」並列出 `api`、`blocked`(不是「Not in use」,沒有
+    「Delete copy」)。然後勾選 Personal,等第一輪同步完成:`web`、`api`、`blocked` 在 Personal 與 `sshelter-local\` 的舊檔裡各有一份
+    (預期:同名的主機有兩份時 SSHelter 不改寫它們,編輯器會說明;舊檔留著,19 會用到)。Mac 先用 `ssh-keygen` 產生 `~/.ssh/id_mac4` 與 `~/.ssh/id_mac5`,
     在 Personal 新增主機 `lab`,在編輯器加上 `IdentityFile ~/.ssh/id_mac4` 並儲存 → 跳出對話框 →「Keep on this computer」。
     再新增主機 `lab2`,加上 `IdentityFile ~/.ssh/id_mac5` 並儲存,用頁尾的「Close」關掉對話框 → Settings → Sync 出現
     「{N} keys used by synced hosts aren't set up」(N 是還沒設定的金鑰數,15 沒處理的 PEM 金鑰也算在內;只有 `id_mac5` 時是
@@ -67,7 +75,12 @@ Windows 暫時留在 0.17.0-4。
     存好新同步碼(做法同 11)。Windows 還沒輸入新同步碼時(Sync now 之後 Status 是「Paused」),Keys 對話框對 `id_mac5` 按
     「Stop syncing」→ toast「Could not change how the key is shared」,說明
     「the sync code was changed on another device; enter the new sync code first」,插槽仍是「Synced to your computers」
-    (對 `id_mac4` 按「Sync this key」也一樣被擋,說明相同)。Windows 在「Enter the new sync code」那一列輸入新同步碼
+    (對 `id_mac4` 按「Sync this key」、在確認對話框按「Sync key」也一樣被擋,說明相同)。Windows 在「Enter the new sync code」那一列輸入新同步碼
     (「Use the new sync code」,toast「Syncing again with the new sync code」)後再按「Stop syncing」→ toast
     「id_mac5 no longer syncs; computers that have it keep their copy」;Mac 同步之後 `id_mac5` 顯示
     「Each computer uses its own key」,Windows 的副本仍在。
+19. **搬出 space 的主機**(兩台都在帳戶裡):Mac 用「Move to file」把 `api` 搬到 `~/.ssh/config`(Personal 裡還有別的主機)→
+    同步之後 Mac 上 `ssh api` 照樣連得上,`~/.ssh/sshelter/keys/id_mac2-xxxxxxxx` 還在;Keys 對話框裡 `id_mac2` 是「Ready」並列出
+    `api`(不是「Not used on this computer」),lint 沒有「IdentityFile not found」。Windows 同步之後 Personal 裡沒有 `api` 了,但 16
+    留在 `sshelter-local\` 舊檔裡的 `api` 還用著同一個插槽:Windows 的 Keys 對話框裡 `id_mac2` 仍是「Ready」(不是「Not in use」,
+    沒有「Delete copy」),`ssh api` 照樣連得上。
