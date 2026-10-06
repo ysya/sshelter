@@ -46,7 +46,10 @@ Windows 暫時留在 0.17.0-4。
     同步來的新副本)。再 Leave:Leave 對話框有「Keys in ~/.ssh/sshelter/keys stay on this computer.」;離開後 `ssh api` 照樣連得上,
     `%USERPROFILE%\.ssh\sshelter\keys\` 裡的插槽檔都還在。
 13. **Windows 的路徑**:Windows 上對一台主機做 Deploy key(寫入 IdentityFile)→ 寫進去的是 `~/.ssh/...`,不是 `C:\Users\...`。
-14. **lint**:手動把主機指到一個不存在的插槽 → lint 顯示「IdentityFile not found: … (a synced key slot — pick a key for it in Keys)」。
+14. **lint**:手動把主機指到一個帳戶裡沒有的插槽(例如 `IdentityFile ~/.ssh/sshelter/keys/nothing-00000000`)→ lint 顯示
+    「IdentityFile not found: … (a key slot your sync account doesn't have — set the key up on the computer that has it)」。帳戶裡有、
+    這台卻還沒有金鑰的插槽顯示「IdentityFile not found: … (a synced key slot — pick a key for it in Keys)」(16 的 Windows 在挑金鑰之前,
+    `lab` 就是這樣)。
 15. **PEM 金鑰**:用一把舊式 PEM 金鑰(`ssh-keygen -m PEM`)的主機 → 對話框的「Sync key」不能按,說明
     「This key isn't in the OpenSSH format, … Convert it with ssh-keygen -p -f <file>, or keep it on this computer.」;
     「Keep on this computer」照常可用。
@@ -84,3 +87,14 @@ Windows 暫時留在 0.17.0-4。
     `api`(不是「Not used on this computer」),lint 沒有「IdentityFile not found」。Windows 同步之後 Personal 裡沒有 `api` 了,但 16
     留在 `sshelter-local\` 舊檔裡的 `api` 還用著同一個插槽:Windows 的 Keys 對話框裡 `id_mac2` 仍是「Ready」(不是「Not in use」,
     沒有「Delete copy」),`ssh api` 照樣連得上。
+20. **之前的帳戶留下的插槽**(兩台都在帳戶裡;`web` 在 8 之後沒有 `IdentityFile`,在 Windows 上又有兩份,所以這裡用新的主機):Mac 先用
+    `ssh-keygen` 產生 `~/.ssh/id_mac6`(公鑰加到測試伺服器),在 Personal 新增主機 `web6`,在編輯器加上 `IdentityFile ~/.ssh/id_mac6`
+    並儲存 → 對話框 →「Sync key」;Windows 同步之後落地它的副本,兩台的 `ssh web6` 都連得上。兩台都 Leave(`web6` 都搬到
+    sshelter-local,照樣連得上)。Mac 在「Create a sync account」按「Create」建立新帳戶;Windows 用 Mac 這時顯示的新同步碼加入、勾選
+    Personal,等第一輪同步完成。Mac 用「Move hosts into a space」把 `web6` 搬進新帳戶的 Personal → 跳出「Keys used by synced hosts」,
+    `id_mac6` 那一列是「web6 uses id_mac6.」,問題下面是「From your previous sync account. Its hosts keep using
+    ~/.ssh/sshelter/keys/id_mac6-xxxxxxxx.」,沒有「Rename」,也沒有要改寫的行 → 按「Sync key」→ toast「id_mac6 syncs to your other
+    computers」;`web6` 的 `IdentityFile` 一個字都沒變,Keys 對話框裡 `id_mac6` 是「Ready」、「Synced to your computers」。Windows 還留著
+    舊帳戶同步來的副本:Mac 按「Sync key」之前,Windows 的 Keys 對話框已經列著 `id_mac6`(「Ready」,但沒有任何動作,它還不在新帳戶裡),
+    也不會問要不要同步它(它的 `web6` 在 Personal 與 `sshelter-local\` 各有一份,同名主機有兩份時 SSHelter 不改寫);同步之後 `id_mac6`
+    是新帳戶的同步插槽,Windows 直接用那份副本(「Ready」,不另外落地),`ssh web6` 連得上,lint 沒有「IdentityFile not found」。
