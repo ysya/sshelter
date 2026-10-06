@@ -11,8 +11,8 @@ Sync v2 拆成四個子專案,各自一份 spec → 計畫 → 實作。**本文
 |---|---|
 | **SP1 Sync v2 基礎(本文)** | Space、一組同步碼、每台裝置自選 space、批次查詢、更換同步碼、v1 升級、危險設定核准、更新已部署的 relay |
 | SP2 Group 與結構化主機 | space 內的多層群組、群組預設值、逐欄合併 |
-| SP3 SSH 金鑰 | 每台裝置一把金鑰與自動部署/撤銷公鑰,或由 SSHelter 當 SSH agent 集中管理(屆時決定) |
-| SP4 分享 | 把單一 space 分享給其他人(以對方公鑰加密 space 金鑰)、可選的私鑰同步 |
+| SP3 SSH 金鑰 | 金鑰插槽與金鑰同步(`2026-10-05-sp3-key-slots-design.md`;取代原本「每台一把金鑰與自動部署/撤銷公鑰,或 SSH agent」的規劃) |
+| SP4 分享 | 把單一 space 分享給其他人(以對方公鑰加密 space 金鑰) |
 
 v1 spec 中尚未實作的 Phase B/C(私鑰與密碼同步 §2/§3.2、金鑰輪替 §8)由 SP3/SP4 與本文的「更換同步碼」取代,
 不再照 v1 spec 實作。
@@ -402,7 +402,8 @@ account `sync:mnemonic-next`。
    與這台尚待核准的記錄)。
 5. **建立與複製**:`PUT` 新帳戶 chain 與每個新 space chain(遇 `429` 暫停,下個小時自動接續)→ 每個 space 的記錄以新
    金鑰重新加密上傳,保留 version、updated_at_ms、device_id 與 tombstone → 新帳戶寫入 `space`(含 `previous_id`)、
-   `spacekey`、`device`、`meta`。
+   `spacekey`、`device`、`meta`,以及 SP3 的 `keyslot`、`key`
+   (`2026-10-05-sp3-key-slots-design.md` §6.6)。
 6. **刪除**:`DELETE` 每個舊 space chain。舊帳戶 chain 保留(凍結、帶著標記),閒置 180 天後由 relay 清除。
 7. **切換**:keychain 的 `sync:mnemonic-next` 取代 `sync:mnemonic`,狀態改用新帳戶(以 `previous_id` 對照保留勾選、
    檔名、待核准項目),清掉 `rotation`。顯示新同步碼。之後再讀一次舊帳戶 chain(凍結的 chain 仍可讀):若有其他裝置的
