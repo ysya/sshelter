@@ -120,8 +120,11 @@
 依 RFC 9987(2026-05,Standards Track)與 OpenSSH 的 PROTOCOL.agent:
 
 - 支援:列出金鑰(只列這台「只在 SSHelter」的金鑰)、簽章:Ed25519、ECDSA(P-256/384/521)、RSA(依請求的 flag 用 SHA-256/512;
-  沒帶 flag 的 SHA-1 照請求簽,同 OpenSSH 的 agent)。
-- 擴充 `session-bind@openssh.com`:驗證伺服器對 session id 的簽章,記下這條連線的主機金鑰,以及是否為轉送。轉送來的請求一律拒絕。
+  沒帶 flag 的 SHA-1 照請求簽,同 OpenSSH 的 agent)。`ssh-key` 0.6.7 的 RSA 簽章有錯(組私鑰時把 `p` 傳了兩次),RSA 改用 `rsa`
+  套件從 n、e、d、p、q 組私鑰再簽(§15)。協定自己實作,不用 `ssh-agent-lib`(§15)。訊息上限 256 KiB(同 OpenSSH)。
+- 擴充 `session-bind@openssh.com`:驗證伺服器對 session id 的簽章,記下這條連線的主機金鑰,以及是否為轉送;簽章驗證失敗回 28
+  (EXTENSION_FAILURE)。連線上只要有一次轉送的 bind,這條連線的簽章請求一律拒絕。被簽的 userauth 資料裡的 session id 要等於最後一次
+  bind 的 session id,hostbound 方法帶的主機金鑰也要相同,否則主機算未知。
 - 其他擴充回 failure(RFC 的要求)。
 - 加入、移除金鑰,以及 lock、unlock:一律 failure。金鑰只能從 Keychain 進來。
 
@@ -150,14 +153,18 @@
 
 ### 5.4 程式辨識
 
-從連上 agent 的 `ssh` 往上找父程序,找到第一個不是 `ssh`、shell 或 login 的程式;在 `.app` 裡的就取 App 名稱。
+從連上 agent 的 `ssh` 往上找父程序(macOS 用 libc 的 `proc_pidinfo`、`proc_pidpath`,不用 `sysinfo`:它的執行檔路徑可能是相對路徑或
+symlink 名稱,§15)。「程式」= 第一個不是 `ssh`、`ssh-keygen`、shell、login、env、sudo 的程式;「App」= 程序鏈裡最外層的應用程式
+(macOS 只認 `<X>.app/Contents/MacOS/<執行檔>` 這種 bundle 主程式,不然 `/usr/bin/git` 實際執行的 Xcode 裡的 git 會顯示成 Xcode)。
+核准視窗的標題用 App,名稱鏈完整列出。
 
 - macOS:`LOCAL_PEERPID`,再用 `proc_pidpath` 與父程序資訊往上找。
 - Linux:`SO_PEERCRED`,再讀 `/proc/<pid>/exe` 與 `/proc/<pid>/stat`。
 - Windows:`GetNamedPipeClientProcessId`、`QueryFullProcessImageNameW`,父程序用 `CreateToolhelp32Snapshot`。
 
-識別值是那個程式的執行檔路徑;如果它是直譯器(例如 `node`、`python`),再加上它執行的腳本路徑(從程序的命令列取得),
-否則 Claude Code 這類用 node 執行的工具,會和其他 node 程式混成同一個。顯示成名稱鏈(例如「claude → zsh → ssh」)。
+識別值是「App 的執行檔路徑 + 程式的執行檔路徑」;程式是直譯器(例如 `node`、`python`)時再加上它執行的腳本路徑(從程序的命令列取得)。
+加上 App,是因為 Claude Code 跑的 `git` 和你在終端機跑的 `git` 是同一個執行檔,只看程式會共用記住的核准。完整的命令列不保存、也不顯示。
+認不出程式時(程序已經結束)顯示「an unknown program」,而且不記住。顯示成名稱鏈(例如「claude → zsh → ssh」)。
 這只是推測:同一使用者的程式可以偽造,所以只用來分組記住核准和顯示給使用者,不當成安全保證。
 
 ### 5.5 passphrase
@@ -350,8 +357,17 @@
   (寫成正斜線)(調查報告 §7.8)。
 - **舊版保存未知種類**:`merge_account` 對不認得的種類只保存密文(`src-tauri/src/sync/merge.rs`)。
 - **協定**:RFC 9987(2026-05,Standards Track),session-bind 不在 RFC 內,見 OpenSSH 的 PROTOCOL 與 PROTOCOL.agent。
-- **套件**(crates.io,2026-10-07):`ssh-key` 0.6.7、`ssh-agent-lib` 0.6.0、`ssh-encoding` 0.3.0、`interprocess` 2.4.4、
-  `objc2-local-authentication` 0.3.2、`windows` 0.62.2。彼此相容與否、功能是否足夠,在第一份計畫的第一個任務驗證。
+- **套件實驗**(2026-10-07,scratch,OpenSSH 10.3p1;報告在 session scratchpad 的 `agent-crate-spike/REPORT.md`):
+  - 採用 `ssh-key` 0.6.7(features `crypto`、`encryption`)與 `ssh-encoding` 0.2(0.3 只配 ssh-key 0.7 預發布版,混用編譯失敗)。
+  - 不用 `ssh-agent-lib` 0.6.0:不能回 SHA-1 RSA 簽章、未知訊息直接斷線(違反 RFC 9987)、沒有長度上限、Windows pipe 不能設 DACL、
+    accept 出錯整個 agent 停掉、debug log 記下整個請求。自己實作約 150 行,已用 `ssh-add -L`、`ssh-keygen -Y sign/verify`、`ssh` 登入
+    驗證 Ed25519、ECDSA P-256/384/521、RSA 3072。
+  - `ssh-key` 0.6.7 的 RSA 簽章壞掉(`[p, p]`);改用 `rsa` 0.9 自己組私鑰,已驗證 flag 0/2/4。`rsa` 0.9 有 RUSTSEC-2023-0071(Marvin),
+    本機 agent 每次簽章都要核准,被量測時間的機會小。
+  - 加密私鑰:aes-ctr/cbc/gcm 與 chacha20-poly1305 都能解;舊式 PEM 與 PKCS#8 讀不了。密碼錯和 cipher 不支援是同一個錯誤,
+    所以先檢查 cipher。
+  - macOS:peer 的 PID 由 `LOCAL_PEEREPID` 取得;Windows:`GetNamedPipeClientProcessId`;Windows 的程式與 pipe DACL 已型別檢查。
+  - Touch ID 要用 `DeviceOwnerAuthentication`(可退回登入密碼);Windows Hello 的桌面版 Interop 需要 Windows 11。
 
 ## 16. 計畫開始前要驗證的
 
