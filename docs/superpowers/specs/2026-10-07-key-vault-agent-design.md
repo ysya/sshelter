@@ -96,13 +96,15 @@
 
 - 插槽目錄 `~/.ssh/sshelter/keys/`:只在 SSHelter 的插槽只放 `<檔名>.pub`,沒有 `<檔名>` 本身。另存成檔案的插槽照 SP3。
   實測(§15):`IdentityFile` 指到 `<檔名>`、只有 `<檔名>.pub` 時,`ssh` 會讀 `.pub` 並向 agent 要對應的私鑰。
-- 產生的設定檔 `~/.ssh/sshelter/agent.config`(§6)。
+- agent 的目錄 `~/.ssh/sshelter/agent/`(0700):產生的設定檔 `config`(§6)、socket `sock`、Connect 的一次性通道 `run/`。
+  不用 `~/.ssh/sshelter/<名稱>.config`:同步把那種路徑當成 space 檔(`hosts_file::is_our_include_token`),
+  每一輪會改寫它的 Include,離開帳戶時還會把它搬到 `sshelter-local`;子目錄裡的檔案不受影響。
 - agent 的位置:
-  - macOS、Linux:`~/.ssh/sshelter/agent.sock`(目錄 0700、socket 0600)。Unix socket 的路徑有長度上限(macOS 104 字元),
+  - macOS、Linux:`~/.ssh/sshelter/agent/sock`(目錄 0700、socket 0600)。Unix socket 的路徑有長度上限(macOS 104 字元),
     啟動時檢查,太長就進入錯誤狀態。
   - Windows:`\\.\pipe\sshelter-agent-<使用者 SID 的雜湊>`;設定檔裡寫成 `//./pipe/sshelter-agent-<…>`(Win32-OpenSSH 8.9 起,
     反斜線的寫法會失敗)。
-- Connect 用的一次性通道(§5.6):`~/.ssh/sshelter/run/<隨機>.sock`;Windows `\\.\pipe\sshelter-connect-<隨機>`。
+- Connect 用的一次性通道(§5.6):`~/.ssh/sshelter/agent/run/<隨機>`;Windows `\\.\pipe\sshelter-connect-<隨機>`。
 
 ## 5. agent
 
@@ -185,29 +187,31 @@
 
 ## 6. 接到 `ssh` 的設定
 
-- SSHelter 產生 `~/.ssh/sshelter/agent.config`,內容只有這台用到「只在 SSHelter」金鑰的主機。原本每個 Host 區塊的 pattern
+- SSHelter 產生 `~/.ssh/sshelter/agent/config`,內容只有這台用到「只在 SSHelter」金鑰的主機。原本每個 Host 區塊的 pattern
   照抄成一個 `Host` 行:
 
   ```text
   # Managed by SSHelter. Changes here are overwritten.
   Host web
-    IdentityAgent ~/.ssh/sshelter/agent.sock
+    IdentityAgent ~/.ssh/sshelter/agent/sock
     IdentitiesOnly yes
   Host *.lab !bastion.lab
-    IdentityAgent ~/.ssh/sshelter/agent.sock
+    IdentityAgent ~/.ssh/sshelter/agent/sock
     IdentitiesOnly yes
   ```
 
-- `~/.ssh/config` 的第一行,加一行 SSHelter 管理的 `Include ~/.ssh/sshelter/agent.config`(寫入前照現有的存檔規則備份)。
+- `~/.ssh/config` 的第一行,加一行 SSHelter 管理的 `Include ~/.ssh/sshelter/agent/config`(寫入前照現有的存檔規則備份)。
   ssh_config 取第一個符合的值:任何 Host 區塊之前的全域設定等於套用到所有主機,space 檔的 Include 也可能排在前面,
-  所以這一行必須在所有內容之前,這兩個設定才會以這裡為準。
+  所以這一行必須在所有內容之前,這兩個設定才會以這裡為準。同步維護自己的 Include 時跳過這一行,排在它後面(`hosts_file::sync_include_index`)。
+- SSHelter 讀取 config 時略過這個產生的檔案(它不是使用者的設定):不然主機清單會重複列出這些主機,主機頁也可能打開到產生的那份。
+- lint:只在 SSHelter 的插槽(只有 `.pub`)不算「IdentityFile not found」。
 - `IdentitiesOnly yes`:只提供這台主機自己的那把金鑰,不把 agent 裡的金鑰全試一遍(Termius 也不這麼做),也避免撞到伺服器的嘗試次數上限。
 - 何時重寫:主機的 `IdentityFile` 變了、金鑰的提供方式變了、插槽改名、space 檔同步進來(主機增減)。
 - 使用者刪掉 Include 那一行:不自動加回;Keychain 顯示「Hosts that use keys in SSHelter can't reach its agent」與「Fix」。
 - `Match` 區塊裡的 `IdentityFile`:不支援,列在「Can't set up automatically」。
 - 不在 SSHelter 設定裡的主機(例如 github.com):Keychain 的「Add a host for this key…」建立一筆主機
-  (`Host github.com`、`User git`、`IdentityFile <插槽>`),之後自動列進 agent.config。
-- `IdentityAgent` 在同步的 space 檔裡仍是需要核准的指令(SP1);agent.config 是本機檔,不同步。
+  (`Host github.com`、`User git`、`IdentityFile <插槽>`),之後自動列進 `agent/config`。
+- `IdentityAgent` 在同步的 space 檔裡仍是需要核准的指令(SP1);`agent/config` 是本機檔,不同步。
 
 ## 7. Keychain 介面(參考 Termius)
 
@@ -272,7 +276,7 @@
 - 已同步的插槽在 Keychain 列為「In SSHelter」,這台標示為「Also keep a file」。上方提示「{N} keys can live only in SSHelter」,逐把決定:
   - SSHelter 自己放的副本(`SyncedCopy`):換成 `.pub`,私鑰放進保管庫。
   - 連到使用者自己檔案的(`Linked`):問「Move into SSHelter」或「Keep the file too」。
-- 第一次有金鑰改成「只在 SSHelter」:寫入 agent.config 與 Include(§6),並建議開機自動啟動(§5.7)。
+- 第一次有金鑰改成「只在 SSHelter」:寫入 `agent/config` 與 Include(§6),並建議開機自動啟動(§5.7)。
 - 不在插槽裡的 `~/.ssh` 金鑰:列在「Key files in ~/.ssh」。
 
 ## 9. MCP
@@ -309,7 +313,7 @@
 ## 12. 測試
 
 - Rust 單元測試:保管庫的加解密與原子寫入;agent 協定(列出、各種簽章、session-bind 解析與驗證、轉送拒絕、不支援的請求回 failure);
-  核准快取(三元組、到期、鎖定清除、每次都問、未知主機);agent.config 的產生與 Include 的插入;程序樹辨識(模擬資料);
+  核准快取(三元組、到期、鎖定清除、每次都問、未知主機);`agent/config` 的產生與 Include 的插入(含和同步的 Include 並存、讀取時略過);程序樹辨識(模擬資料);
   `keyprefs` 的合併與補寫;搬遷。
 - 用真的 OpenSSH 測 agent,不需要 sshd:`ssh-add -L` 列出;`ssh-keygen -Y sign` 經 agent 簽章、`ssh-keygen -Y verify` 驗證。
   macOS、Linux 與 Windows 的 CI 都能跑(Windows CI 用自己的 pipe)。
@@ -328,7 +332,7 @@
 
 一份 spec,分三份計畫(同 Sync v2):
 
-1. 保管庫與 agent 核心:保管庫檔、agent 協定、socket/pipe、核准規則與快取、passphrase、程式辨識、agent.config 與 Include、Connect。
+1. 保管庫與 agent 核心:保管庫檔、agent 協定、socket/pipe、核准規則與快取、passphrase、程式辨識、`agent/config` 與 Include、Connect。
 2. Keychain 頁、核准視窗、主機編輯器挑金鑰、Export to host、搬遷、`keyprefs`。
 3. 移除 MCP `run`、文件、平台收尾(Windows、Touch ID/Windows Hello、鎖定偵測、隱藏啟動)。
 
