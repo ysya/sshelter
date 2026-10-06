@@ -3828,6 +3828,19 @@ mod tests {
     }
 
     #[test]
+    fn a_very_long_user_name_is_shortened_for_the_window() {
+        let broker = Broker::default();
+        let host = FakeHost::new();
+        host.answer(allow(false));
+        let mut long = request(test_keys::PLAIN_PUBLIC, Some(host_key()));
+        long.user = Some("u".repeat(5000));
+        broker.sign(&host, &long, Some(&program("claude")), None);
+        let shown = host.asked()[0].user.clone().unwrap();
+        assert_eq!(shown.chars().count(), 257);
+        assert!(shown.ends_with('…'));
+    }
+
+    #[test]
     fn clear_forgets_approvals_and_opened_keys() {
         let broker = Broker::default();
         let host = FakeHost::new();
@@ -4019,6 +4032,19 @@ pub struct Broker {
     asking: Mutex<HashMap<ApprovalKey, Arc<Pending>>>,
 }
 
+/// 視窗裡顯示的使用者名稱最多幾個字元:它來自 ssh 送來的資料,可能很長。
+const MAX_SHOWN_CHARS: usize = 256;
+
+/// 最多 `max` 個字元,超過的部分換成「…」。
+fn shorten(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        return text.to_string();
+    }
+    let mut out: String = text.chars().take(max).collect();
+    out.push('…');
+    out
+}
+
 /// 一個簽章請求要顯示的一切。
 struct Ask<'a> {
     key: &'a VaultKey,
@@ -4036,7 +4062,7 @@ impl Ask<'_> {
             key_name: self.key.name.clone(),
             key_fingerprint: self.key.fingerprint.clone(),
             program_chain: self.program.map(|p| p.chain.clone()).unwrap_or_default(),
-            user: self.request.user.clone(),
+            user: self.request.user.as_deref().map(|user| shorten(user, MAX_SHOWN_CHARS)),
             host: self.host_display.clone(),
             host_fingerprint: self.host_fingerprint.clone(),
             rememberable,
@@ -4266,7 +4292,7 @@ If the compiler says `Material` is not `Send`/`Sync` (needed because `AgentRunti
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: same command as Step 2.
-Expected: PASS (15 tests). The parallel test must pass 20 runs in a row: `for i in $(seq 20); do cargo test --offline --lib agent::broker::tests::identical -- --skip secrets::tests::round_trip_set_get_delete --skip askpass::tests::env_secret_takes_priority_over_keychain -q || break; done`.
+Expected: PASS (16 tests). The parallel test must pass 20 runs in a row: `for i in $(seq 20); do cargo test --offline --lib agent::broker::tests::identical -- --skip secrets::tests::round_trip_set_get_delete --skip askpass::tests::env_secret_takes_priority_over_keychain -q || break; done`.
 
 - [ ] **Step 5: Run the full Rust suite and commit**
 
@@ -4295,7 +4321,7 @@ git commit -m "feat(agent): decide which keys to offer, when to ask and how to u
   - `#[derive(Clone, Debug, Default, PartialEq, Eq)] pub enum AgentStatus { #[default] NotStarted, Running, OtherInstance, Failed(String) }`; `AgentRuntime.status: Mutex<AgentStatus>`
   - `crate::agent::AppAgentHost { pub app: tauri::AppHandle }` implementing `AgentHost`
   - `crate::agent::start(app: &tauri::AppHandle)`
-  - `crate::agent::server::{MAX_CONNECTIONS = 64, Stream, Handler, Started { Running, OtherInstance }, take_lock, dispatch, listen_unix}`; `#[cfg(unix)] pub(crate) fn check_socket_path(&Path) -> Result<(), AppError>`; `#[cfg(unix)] pub(crate) fn peer(&UnixStream) -> Result<Option<u32>, ()>`; `#[cfg(test)] server::testing::{NoKeys, serving}`
+  - `crate::agent::server::{MAX_CONNECTIONS = 64, Stream, Handler, Started { Running, OtherInstance }, take_lock, dispatch, listen_unix}`; `#[cfg(unix)] pub(crate) fn check_socket_path(&Path) -> Result<(), AppError>`; `#[cfg(unix)] pub(crate) fn peer(&UnixStream) -> Result<Option<u32>, ()>`; `#[cfg(unix)] pub(crate) const IDLE_TIMEOUT: Duration` (5 minutes); `#[cfg(test)] server::testing::{NoKeys, serving}`
   - `#[cfg(windows)] crate::agent::pipe_windows::{pipe_name() -> io::Result<String>, listen(dir, name, handle) -> Result<Started, AppError>}`; `pub(crate) fn accept(&OwnedHandle) -> io::Result<Option<u32>>`; private `create_instance(path, security, first, max_instances)`, `wide_pipe_path(name)`, `OwnerOnly` (Task 12 adds a one-shot pipe next to them)
 
 Rules (spec §4.4, §5.1, §5.7, §11):
@@ -4488,6 +4514,11 @@ pub(crate) fn dispatch(stream: Stream, pid: Option<u32>, active: &Arc<AtomicUsiz
 #[cfg(unix)]
 const SUN_PATH_MAX: usize = if cfg!(target_os = "macos") { 104 } else { 108 };
 
+/// 一條連線兩則訊息之間最多閒置多久(等核准視窗時沒有在讀,不算):ssh 認證完就關掉它的 agent 連線,閒置的連線不該一直佔著
+/// `MAX_CONNECTIONS` 的名額。Windows 的 pipe(`File`)沒有讀取逾時,不設。
+#[cfg(unix)]
+pub(crate) const IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
+
 /// socket 路徑放不放得進 `sun_path`;放不進就說清楚(`bind` 自己的錯誤訊息看不出原因)。
 #[cfg(unix)]
 pub(crate) fn check_socket_path(sock: &Path) -> Result<(), AppError> {
@@ -4534,6 +4565,7 @@ pub fn listen_unix(dir: &Path, handle: Handler) -> Result<Started, AppError> {
             };
             // 不是同一個使用者:直接關掉。
             let Ok(pid) = peer(&stream) else { continue };
+            let _ = stream.set_read_timeout(Some(IDLE_TIMEOUT));
             dispatch(stream, pid, &active, &handle);
         }
     })?;
@@ -6175,6 +6207,7 @@ pub fn open(run_dir: &Path, serve: Box<dyn FnOnce(Stream, Option<u32>) + Send>, 
             // macOS 的 accept 沿用 listener 的 non-blocking;不是同一個使用者就不服務。
             if stream.set_nonblocking(false).is_ok() {
                 if let Ok(pid) = crate::agent::server::peer(&stream) {
+                    let _ = stream.set_read_timeout(Some(crate::agent::server::IDLE_TIMEOUT));
                     serve(stream, pid);
                 }
             }
