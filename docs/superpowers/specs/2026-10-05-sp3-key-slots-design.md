@@ -167,7 +167,8 @@ key_slots: { <slot id>: { file_name,
 
 ### 6.5 指紋檢查
 
-在啟動、每輪同步、打開 Keys 對話框時,對 `key_slots` 裡每個連結比對來源檔的指紋:
+在啟動與每輪同步時(視窗重新取得焦點會跑一輪),對 `key_slots` 裡每個連結比對來源檔的指紋;打開 Keys 對話框不另外檢查,
+顯示最近一輪的結果(app 開著時換掉金鑰檔,要等下一輪才更新):
 
 - 來源檔換成另一把金鑰:
   - Unix 的 symlink 本來就跟著路徑走。
@@ -249,6 +250,7 @@ key_slots: { <slot id>: { file_name,
 | 插槽路徑上已經有不是 SSHelter 建立的檔案 | 不覆蓋;狀態說明,請使用者把它移走 |
 | 來源檔不見 | 狀態為「The key this slot points to is gone」 |
 | 主機被 FA3 規則鎖住 | 對話框列出並說明,不改寫 |
+| 更換同步碼進行中、或這台錯過了更換(已凍結) | 建立插槽、Sync this key、Stop syncing 一律拒絕(不讀檔、不寫記錄),訊息與 space 操作相同(「finish or cancel changing the sync code first」、「the sync code was changed on another device; enter the new sync code first」),等更換完成再做(§6.6) |
 | 帳戶 chain 超過 relay 額度 | 沿用 SP1 §9 |
 
 ## 10. 測試
