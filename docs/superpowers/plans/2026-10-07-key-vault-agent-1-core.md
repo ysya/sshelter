@@ -57,7 +57,7 @@
 | `src-tauri/src/sync/hosts_file.rs`, `config/include.rs`, `config/intel.rs` (modify) | Sync Include skips the agent Include; loader skips `agent/config`; lint accepts vault slots |
 | `src-tauri/src/connect.rs`, `tray.rs` (modify) | Connect through a one-shot channel |
 | `src-tauri/src/sync/slot_files_windows.rs` (modify) | `current_user_token` shared with the pipe |
-| `src-tauri/src/lib.rs`, `state.rs`, `Cargo.toml`, `capabilities/default.json` (modify) | Wiring, commands, dependencies, approval window capability |
+| `src-tauri/src/lib.rs`, `state.rs`, `Cargo.toml` (modify), `capabilities/approval.json` (create) | Wiring, commands, dependencies, the approval window's minimal capability |
 | `src/main.tsx` (modify), `src/components/AgentApprovalWindow.tsx` (create), `src/lib/agent.ts` (create) | Approval window UI |
 | `src/components/KeySlotsSection.tsx`, `src/lib/key-slots.ts`, `src/lib/sync.ts`, `src/lib/sync-fixtures.ts` (modify) | "Only in SSHelter" toggle, the agent problem line |
 | `.github/workflows/test-windows.yml` (modify) | Run vault and agent tests on Windows |
@@ -2029,7 +2029,8 @@ git commit -m "feat(agent): name the program that asks for a key"
 
 **Files:**
 - Create: `src-tauri/src/agent/prompt.rs`
-- Modify: `src-tauri/src/agent/mod.rs` (module + `AgentRuntime`), `src-tauri/src/state.rs` (`AppState.agent`), `src-tauri/src/lib.rs` (commands), `src-tauri/capabilities/default.json`
+- Modify: `src-tauri/src/agent/mod.rs` (module + `AgentRuntime`), `src-tauri/src/state.rs` (`AppState.agent`), `src-tauri/src/lib.rs` (commands)
+- Create: `src-tauri/capabilities/approval.json` (the approval window's own, minimal capability)
 - Create: `src/lib/agent.ts`, `src/lib/agent.test.ts`, `src/components/AgentApprovalWindow.tsx`, `src/components/AgentApprovalWindow.test.tsx`
 - Modify: `src/main.tsx`
 - Generated: `src/bindings/AgentApprovalRequest.ts`, `src/bindings/AgentApprovalAnswer.ts` (written by `cargo test`; commit them)
@@ -2345,7 +2346,17 @@ In `src-tauri/src/state.rs`, add the field `pub agent: crate::agent::AgentRuntim
 
 In `src-tauri/src/lib.rs`, add `use agent::prompt::{agent_pending, agent_resolve};` next to the other command imports and add `agent_pending, agent_resolve,` to the `tauri::generate_handler![...]` list.
 
-In `src-tauri/capabilities/default.json`, change `"windows": ["main"]` to `"windows": ["main", "approval"]`.
+Create `src-tauri/capabilities/approval.json` (every file in `capabilities/` is loaded; `tauri.conf.json` lists none). The approval window only calls the two app commands above and listens for `agent://approvals`, so it gets `core:default` and none of the main window's updater, autostart, shortcut, dialog or clipboard permissions:
+
+```json
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "approval",
+  "description": "The SSH agent's approval window: it lists and answers pending requests (app commands) and listens for their updates. Nothing else.",
+  "windows": ["approval"],
+  "permissions": ["core:default"]
+}
+```
 
 - [ ] **Step 4: Run the Rust tests to verify they pass, and generate the bindings**
 
@@ -2696,7 +2707,7 @@ Expected: all pass.
 - [ ] **Step 9: Run the full Rust suite and commit**
 
 ```bash
-git add src-tauri/src/agent src-tauri/src/state.rs src-tauri/src/lib.rs src-tauri/capabilities/default.json src/lib/agent.ts src/lib/agent.test.ts src/components/AgentApprovalWindow.tsx src/components/AgentApprovalWindow.test.tsx src/main.tsx src/bindings/AgentApprovalRequest.ts src/bindings/AgentApprovalAnswer.ts
+git add src-tauri/src/agent src-tauri/src/state.rs src-tauri/src/lib.rs src-tauri/capabilities/approval.json src/lib/agent.ts src/lib/agent.test.ts src/components/AgentApprovalWindow.tsx src/components/AgentApprovalWindow.test.tsx src/main.tsx src/bindings/AgentApprovalRequest.ts src/bindings/AgentApprovalAnswer.ts
 git commit -m "feat(agent): add the approval prompt hub and the approval window"
 ```
 
