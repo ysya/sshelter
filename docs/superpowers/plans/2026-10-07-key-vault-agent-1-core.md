@@ -2715,6 +2715,8 @@ git commit -m "feat(agent): add the approval prompt hub and the approval window"
 
 ### Task 7: Vault delivery for key slots
 
+> Ruled during implementation (see the SDD ledger): `use_synced` on a vault slot is refused with `VAULT_FIRST_MESSAGE` like `pick` (the vault key may be the last copy), and its test is a refusal; `set_delivery(false)` commits the record before removing the vault entry; `republish`'s vault arm also checks the vault text's own fingerprint. The text below predates these rulings.
+
 **Files:**
 - Modify: `src-tauri/src/sync/state_v2.rs` (`SlotSource`)
 - Modify: `src-tauri/src/sync/slots.rs` (every `SlotSource` match, `reconcile`, `republish`, `set_mode`, `pick`, `use_synced`, `delete_copy`, `views`, new `set_delivery`, `vault_slot_files`, `VaultKeys`)
@@ -5500,6 +5502,7 @@ git commit -m "feat(agent): point hosts on vault keys at SSHelter's agent throug
 
 Behavior (spec §6, §7.3, §7.4, §11, §14 item 1):
 - A slot row offers `Only in SSHelter` when this computer has the key in a file and hosts use it here (`status.kind === "ready"`, `in_account`), and `Keep a file` whenever the slot is in the vault (always a way back out).
+- A vault row offers neither `Pick a key…`/`Change…` nor `Use the synced key`: the backend refuses both with "This key is only in SSHelter. Choose Keep a file first." (Task 7 ruling: the vault key may be the last copy). `slotActions` turns `pick` and `useSynced` off for `in_vault` slots; the status line still says when a synced key is available.
 - `Keep a file` asks first: "Keep {name} as a file?" / "Any program on this computer can use the file without asking." / `Cancel` / `Keep a file`. `Only in SSHelter` needs no confirm; the first time any slot moves in, the success toast adds "Hosts that use it connect only while SSHelter is open. In Settings, turn on Launch at login and Keep running in menu bar when window closes." (spec §5.7; the hidden launch at login is Plan 3).
 - A vault slot's row says "Only in SSHelter on this computer — programs ask before they use it".
 - Above the rows, while any slot is in the vault: "SSHelter's agent isn't running: {reason}" when it failed to start, else "Hosts that use keys in SSHelter can't reach its agent." with a `Fix` button that puts the Include back first in `~/.ssh/config` (spec §6: never re-added on its own). Another SSHelter providing the agent is not a problem.
@@ -5676,9 +5679,19 @@ describe("the agent problem line", () => {
 
 (Merge the import into the file's existing `@/lib/agent` import.)
 
-Append to `src/lib/key-slots.test.ts` (import `deliveryAction`, `deliveryLine` and `keySlot` the way the file already imports its helpers and fixtures):
+Append to `src/lib/key-slots.test.ts` (import `deliveryAction`, `deliveryLine`, `slotActions` and `keySlot` the way the file already imports its helpers and fixtures):
 
 ```ts
+describe("a vault row's actions", () => {
+  it("hides Pick and Use the synced key, which the backend refuses for a vault key", () => {
+    const actions = slotActions(keySlot({ in_vault: true, status: { kind: "synced_available", file: "/f" } }));
+    expect(actions.pick).toBeNull();
+    expect(actions.useSynced).toBe(false);
+    expect(actions.stopSyncing).toBe(true);
+    expect(slotActions(keySlot({ in_vault: true, mode: "own", fingerprint: null })).syncThis).toBe(true);
+  });
+});
+
 describe("where this computer keeps a slot's key", () => {
   it("offers Only in SSHelter for a ready file and Keep a file for a vault key", () => {
     expect(deliveryAction(keySlot())).toBe("vault");
