@@ -67,6 +67,8 @@
 
 ### Task 1: Vault store
 
+> Implemented as c1e7669 + 9211912. The review changed it: a newer vault file stays in place (version probed first), a vault whose `vault:key` is gone is set aside as `vault.keyless-<ms>.json`, set-aside never overwrites, and the lock tolerates poisoning. The code below is the original text; the commits and the SDD ledger are authoritative.
+
 **Files:**
 - Modify: `src-tauri/Cargo.toml`, `src-tauri/Cargo.lock`
 - Modify: `src-tauri/src/sync/crypto.rs` (after `open`, before `#[cfg(test)]`)
@@ -1145,6 +1147,8 @@ git commit -m "feat(agent): add the approval policy and the remembered-approval 
 
 ### Task 4: Agent protocol and sessions
 
+> Implemented as 49822f0 + 7b8883d. The review changed it: a userauth blob counts only when its key is the requested key and its service is `ssh-connection`, and every length-prefixed field must be read to its end (`read_prefixed_exact`). The code below is the original text; the commits and the SDD ledger are authoritative.
+
 **Files:**
 - Create: `src-tauri/src/agent/protocol.rs`, `src-tauri/src/agent/session.rs`
 - Modify: `src-tauri/src/agent/mod.rs` (`pub mod protocol; pub mod session;`)
@@ -1624,6 +1628,8 @@ git commit -m "feat(agent): speak the SSH agent protocol with session-bind"
 ---
 
 ### Task 5: Program identification
+
+> Implemented as 05a90ec + f3e3216 + 0b0eb93 + fd87494. The review changed it: macOS reads parents with `PROC_PIDT_SHORTBSDINFO` (the full flavor fails on root-owned `login`), interpreter scripts are read only before the first non-option argument (`interpreted`), login shells are recognised by `argv[0]`, only the needed arguments are kept (`needed_args`), `KERN_PROCARGS2` parsing is bounded (`parse_procargs2`), the walk stops on cycles (`walk`), Linux `(deleted)` suffixes and any-case `.exe` are handled. The code below is the original text; the commits and the SDD ledger are authoritative.
 
 **Files:**
 - Modify: `src-tauri/Cargo.toml`, `src-tauri/Cargo.lock` (`libc` for Unix; Windows features)
