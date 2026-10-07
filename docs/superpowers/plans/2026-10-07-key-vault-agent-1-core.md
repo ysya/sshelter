@@ -4951,11 +4951,17 @@ impl broker::AgentHost for AppAgentHost {
     }
 
     fn private_key(&self, slot_id: &str) -> Result<Option<Zeroizing<String>>, AppError> {
-        crate::sync::engine::with_env(&self.app, |env| {
+        let result = crate::sync::engine::with_env(&self.app, |env| {
             with_vault(env.runtime, &vault_path(&env.state_path), env.keychain, env.now(), |vault| vault.get(slot_id))
                 .map(|entry| entry.map(|entry| Zeroizing::new(entry.private_key.clone())))
                 .map_err(AppError::from)
-        })?
+        })
+        .and_then(|inner| inner);
+        // 使用者按了允許,金鑰卻拿不出來(keychain 鎖著、保管庫讀不懂):broker 只會拒絕,原因記在這裡。
+        if let Err(e) = &result {
+            eprintln!("[agent] cannot read the key from SSHelter's vault: {e}");
+        }
+        result
     }
 
     fn settings(&self) -> AgentSettings {
