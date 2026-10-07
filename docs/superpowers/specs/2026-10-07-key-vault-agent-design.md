@@ -183,6 +183,8 @@ symlink 名稱,§15)。「程式」= 第一個不是 `ssh`、`ssh-keygen`、shel
 2. 有 passphrase、這台沒記住:先在 SSHelter 問。
 3. 開一個一次性通道(§4.4),在終端機執行 `ssh -o IdentityAgent=<通道> -o ForwardAgent=no <主機>`(沿用 `connect.rs` 的參數組法與各終端機)。
 4. 通道只接受同一使用者的第一個連線,60 秒逾時,只提供這台主機的金鑰,認證完成就關閉。視為已核准:不跳視窗,也不算進記住的核准。
+   60 秒之後才連上來的 ssh 拿不到金鑰:通道留到開啟後 10 分鐘,只為了讓畫面請使用者再按一次 Connect。`ssh` 只在第一次試公鑰認證時才連
+   agent(重用 ControlMaster 的連線、先用密碼登入就不會連),所以一直沒人連就安靜關掉,不說什麼。
 
 系統匣的快速連線同上。以密碼登入、由 SSHelter 自動填密碼的連線(`connect.rs`)不受影響。
 
@@ -314,7 +316,8 @@ symlink 名稱,§15)。「程式」= 第一個不是 `ssh`、`ssh-keygen`、shel
 | 保管庫檔讀不懂、或系統 Keychain 裡的 `vault:key` 不見 | 不覆寫,搬到旁邊保留;同步過的金鑰從帳戶重新取回;只在這台的金鑰只能靠匯出的備份 |
 | 系統 Keychain 不可用 | 保管庫停用,金鑰只能另存成檔案 |
 | 核准逾時、拒絕、passphrase 錯三次、系統驗證取消 | 拒絕這次請求;`ssh` 繼續試別的方式或失敗 |
-| 一次性通道逾時、這台還沒拿到同步的金鑰 | Connect 不啟動,說明原因 |
+| 這台的保管庫沒有這台主機要用的金鑰 | Connect 不啟動,說明原因 |
+| 一次性通道的 60 秒過了,`ssh` 才來要金鑰 | 不提供;畫面請使用者再按一次 Connect(§5.6) |
 | 在自己的終端機連用保管庫金鑰的主機,而 SSHelter 沒開 | `ssh` 顯示 `no such identity`;主機頁提示「This host's key is in SSHelter; open SSHelter to connect」 |
 
 ## 12. 測試
