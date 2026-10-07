@@ -4348,6 +4348,7 @@ Rules (spec §4.4, §5.1, §5.7, §11):
 - Unix: the socket path is checked against the platform limit (104 bytes on macOS, 108 on Linux, including the NUL) before anything else; a leftover `sock` is removed only by the lock holder; the socket is 0600 inside the 0700 directory; a peer whose effective UID differs is closed at once; the peer PID comes from `LOCAL_PEEREPID` (falling back to `LOCAL_PEERPID`) on macOS and `SO_PEERCRED` on Linux.
 - Windows: `\\.\pipe\sshelter-agent-<first 16 hex of SHA-256 of the user's SID string>`; every instance gets the owner-only DACL and `PIPE_REJECT_REMOTE_CLIENTS`; the first uses `FILE_FLAG_FIRST_PIPE_INSTANCE`, so a name someone else already holds is an error (spec §11); the next instance is created before a connection is served; the client PID comes from `GetNamedPipeClientProcessId`.
 - At most 64 connections at once; more are closed. Each connection runs on its own thread: the program is identified once (Task 5), then `session::serve` runs with a `Connection` (Task 8).
+- `start` also runs a thread that calls `Broker::expire(now)` once a minute (Task 8's review: opened keys and remembered approvals are dropped when their window ends, not at the next request).
 - The agent starts in `run_app`'s `setup` for both the normal app and `--mcp-host` (both open windows). The `--mcp` stdio adapter never builds Tauri and never starts it. A failure is stored in `AgentRuntime.status` and logged; SSHelter keeps working.
 
 - [ ] **Step 1: Add the Windows features and expose the token helper**
@@ -5000,6 +5001,12 @@ impl broker::AgentHost for AppAgentHost {
 /// 開 agent(SSHelter 的視窗程式啟動時,含 `--mcp-host`;`--mcp` 的 stdio 轉接不建 Tauri,不會到這裡)。開不起來只記下原因(spec §11),
 /// SSHelter 其他功能照常。
 pub fn start(app: &tauri::AppHandle) {
+    // 記住的核准與解開的私鑰到期就丟掉(spec §5.5),不等下一個請求;agent 開不起來也照做(Connect 的一次性通道仍會用到 broker)。
+    let janitor = app.clone();
+    let _ = std::thread::Builder::new().name("sshelter-agent-expire".to_string()).spawn(move || loop {
+        std::thread::sleep(std::time::Duration::from_secs(60));
+        janitor.state::<AppState>().agent.broker.expire(SystemClock.now_ms());
+    });
     let status = match listen(app) {
         Ok(server::Started::Running) => AgentStatus::Running,
         Ok(server::Started::OtherInstance) => AgentStatus::OtherInstance,
