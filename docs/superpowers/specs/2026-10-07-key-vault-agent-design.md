@@ -111,7 +111,7 @@
 ### 5.1 端點與存取
 
 - agent 跑在 SSHelter 的視窗程式裡,隨程式啟動。同一個使用者只有一個:已經有 SSHelter 在提供,就不再開。
-- 無視窗模式(`--mcp-host`)不開 agent:核准需要視窗。
+- 沒有視窗的 MCP stdio 轉接(`--mcp`)不開 agent:它不建立 Tauri,核准需要視窗。`--mcp-host` 是完整的視窗程式(核准中心),照常開 agent(同一個使用者只會有一個在提供)。
 - Unix:接受連線後檢查對方的 UID 等於自己(`getpeereid`)。
 - Windows:pipe 的 DACL 只給目前使用者;設 `PIPE_REJECT_REMOTE_CLIENTS`;用 `FILE_FLAG_FIRST_PIPE_INSTANCE` 防止名稱被搶先佔用。
 
