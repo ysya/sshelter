@@ -5502,6 +5502,7 @@ git commit -m "feat(agent): point hosts on vault keys at SSHelter's agent throug
 
 Behavior (spec §6, §7.3, §7.4, §11, §14 item 1):
 - A slot row offers `Only in SSHelter` when this computer has the key in a file and hosts use it here (`status.kind === "ready"`, `in_account`), and `Keep a file` whenever the slot is in the vault (always a way back out).
+- Delete copy on a vault row says what it deletes: "The key {name} kept in SSHelter on this computer is deleted. If it is your only copy, it is gone. Other computers aren't affected." (the vault entry may be the last copy; Task 7 review).
 - A vault row offers neither `Pick a key…`/`Change…` nor `Use the synced key`: the backend refuses both with "This key is only in SSHelter. Choose Keep a file first." (Task 7 ruling: the vault key may be the last copy). `slotActions` turns `pick` and `useSynced` off for `in_vault` slots; the status line still says when a synced key is available.
 - `Keep a file` asks first: "Keep {name} as a file?" / "Any program on this computer can use the file without asking." / `Cancel` / `Keep a file`. `Only in SSHelter` needs no confirm; the first time any slot moves in, the success toast adds "Hosts that use it connect only while SSHelter is open. In Settings, turn on Launch at login and Keep running in menu bar when window closes." (spec §5.7; the hidden launch at login is Plan 3).
 - A vault slot's row says "Only in SSHelter on this computer — programs ask before they use it".
@@ -5741,6 +5742,13 @@ describe("keeping a slot's key only in SSHelter", () => {
     expect(failed).not.toContain(">Fix<");
   });
 
+  it("warns that deleting a vault key may delete the only copy", () => {
+    const tree = DeleteCopyConfirm({ slot: keySlot({ in_vault: true, status: { kind: "not_in_use", file: "/f" } }), open: true, onCancel: () => {}, onConfirm: () => {} });
+    expect(elementsOf(tree, AlertDialogDescription).map(textIn)).toEqual([
+      "The key id_mac kept in SSHelter on this computer is deleted. If it is your only copy, it is gone. Other computers aren't affected.",
+    ]);
+  });
+
   it("shows the problem above the rows only while a key is in the vault", () => {
     const render = (slot: SyncKeySlotView) => {
       const queryClient = new QueryClient();
@@ -5897,6 +5905,18 @@ export function AgentProblemLine({ problem, busy, onFix }: { problem: AgentProbl
 ```
 
 `KeepFileConfirm`'s title is one string in the tests: write it as a template literal (`{`Keep ${…} as a file?`}`) if the JSX above splits it into several text nodes and `textIn` then does not match.
+
+In `DeleteCopyConfirm`, use that text when `slot?.in_vault` (keep today's text otherwise):
+
+```tsx
+          <AlertDialogDescription>
+            {slot?.in_vault
+              ? `The key ${revealHidden(slot.name)} kept in SSHelter on this computer is deleted. If it is your only copy, it is gone. Other computers aren't affected.`
+              : `The copy of ${slot ? revealHidden(slot.name) : ""} on this computer is deleted. Other computers aren't affected.`}
+          </AlertDialogDescription>
+```
+
+(The existing test for the non-vault text must still pass unchanged; if it compares one text node, the template literal keeps it one string.)
 
 4. In `KeySlotsSection`: add `const delivery = useKeySetDelivery();`, `const fix = useFixAgentInclude();`, `const [keeping, setKeeping] = useState<SyncKeySlotView | null>(null);` and `const shownKeeping = useLastNonNull(keeping);` with the other hooks; after `const slots = …` and **before** `if (slots.length === 0) return null;` add
 
