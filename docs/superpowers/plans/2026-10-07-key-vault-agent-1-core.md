@@ -5507,7 +5507,7 @@ git commit -m "feat(agent): point hosts on vault keys at SSHelter's agent throug
 **Interfaces:**
 - Consumes: Task 9 `AgentStatus`, `AgentRuntime.status`; Task 7 `sync_key_set_delivery(slot_id, vault)`, `SyncKeySlotView.in_vault`; Task 10 `wiring::{WiringStatus, agent_config_path, is_agent_include, put_include_first}`.
 - Produces:
-  - `crate::agent::wiring::status(doc: &SshConfigDoc, home: &Path) -> WiringStatus`
+  - `crate::agent::wiring::status(doc: &SshConfigDoc, home: &Path, vault_files: &BTreeSet<String>) -> WiringStatus`
   - `crate::agent::wiring::restore_include(doc: &mut SshConfigDoc, backed_up: &mut HashSet<PathBuf>, retention: Option<usize>, home: &Path) -> Result<(), AppError>`
   - `#[serde(tag = "kind", rename_all = "snake_case")] pub enum AgentProblem { NotRunning { reason: String }, IncludeMissing }` (ts-rs), `pub fn problem(status: &AgentStatus, wiring: WiringStatus) -> Option<AgentProblem>`
   - Commands `agent_problem() -> Result<Option<AgentProblem>, AppError>`, `agent_fix_include() -> Result<Option<AgentProblem>, AppError>`
@@ -5537,13 +5537,18 @@ In `src-tauri/src/agent/wiring.rs`'s `tests` module, add:
     #[test]
     fn status_tells_whether_ssh_reaches_the_agent() {
         let home = tempfile::tempdir().unwrap();
+        let none = BTreeSet::new();
         let doc = loaded(home.path(), "Host a\n  HostName x\n");
-        assert_eq!(status(&doc, home.path()), WiringStatus::NotNeeded);
+        assert_eq!(status(&doc, home.path(), &none), WiringStatus::NotNeeded);
+        // A host on a vault key, but the first Include add never succeeded (agent/config is only written after it).
+        let vault = BTreeSet::from(["id_mac-11111111".to_string()]);
+        let on_vault = loaded(home.path(), "Host a\n  IdentityFile ~/.ssh/sshelter/keys/id_mac-11111111\n");
+        assert_eq!(status(&on_vault, home.path(), &vault), WiringStatus::IncludeMissing, "needed but not wired yet");
         std::fs::create_dir_all(crate::agent::agent_dir(home.path())).unwrap();
         std::fs::write(agent_config_path(home.path()), format!("{HEADER}\n")).unwrap();
-        assert_eq!(status(&doc, home.path()), WiringStatus::IncludeMissing);
+        assert_eq!(status(&doc, home.path(), &none), WiringStatus::IncludeMissing);
         let doc = loaded(home.path(), "Include ~/.ssh/sshelter/agent/config\nHost a\n");
-        assert_eq!(status(&doc, home.path()), WiringStatus::Ready);
+        assert_eq!(status(&doc, home.path(), &none), WiringStatus::Ready);
     }
 
     #[test]
@@ -5588,10 +5593,11 @@ Expected: compile errors (`status`, `restore_include`, `problem`, `AgentProblem`
 In `src-tauri/src/agent/wiring.rs`, add after `refresh_env`:
 
 ```rust
-/// 這台的 `ssh` 接不接得到 agent(畫面提示用;spec §6、§11):沒有 `agent/config` → NotNeeded;主 config 是預設的 `~/.ssh/config` 而且有 agent 的
-/// Include → Ready;其他 → IncludeMissing。
-pub fn status(doc: &SshConfigDoc, home: &Path) -> WiringStatus {
-    if !agent_config_path(home).exists() {
+/// 這台的 `ssh` 接不接得到 agent(畫面提示用;spec §6、§11):沒有主機用到只在 SSHelter 的金鑰、也從沒寫過 `agent/config` → NotNeeded;主 config
+/// 是預設的 `~/.ssh/config` 而且有 agent 的 Include → Ready;其他(使用者拿掉了,或第一次一直加不進去 —— `agent/config` 要等 Include 放好才寫)→ IncludeMissing。
+pub fn status(doc: &SshConfigDoc, home: &Path, vault_files: &BTreeSet<String>) -> WiringStatus {
+    let needed = agent_config_path(home).exists() || !vault_host_patterns(doc, vault_files, home).is_empty();
+    if !needed {
         return WiringStatus::NotNeeded;
     }
     let default_root = home.join(".ssh").join("config");
@@ -5647,7 +5653,13 @@ pub(crate) fn home_dir() -> Result<PathBuf, AppError> {
 
 fn current_problem(state: &AppState) -> Result<Option<AgentProblem>, AppError> {
     let home = home_dir()?;
-    let wiring = state.doc.lock().unwrap().as_ref().map_or(wiring::WiringStatus::NotNeeded, |doc| wiring::status(doc, &home));
+    let wiring = {
+        // doc → core,同 `config/commands.rs` 的順序。
+        let doc_lock = state.doc.lock().unwrap();
+        let vault_files =
+            state.sync.core.lock().unwrap().state.as_ref().map(crate::sync::slots::vault_slot_files).unwrap_or_default();
+        doc_lock.as_ref().map_or(wiring::WiringStatus::NotNeeded, |doc| wiring::status(doc, &home, &vault_files))
+    };
     let status = state.agent.status.lock().unwrap().clone();
     Ok(problem(&status, wiring))
 }
