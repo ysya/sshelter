@@ -2408,7 +2408,7 @@ describe("approval text", () => {
   });
 
   it("shows hidden characters from other programs instead of rendering them", () => {
-    expect(destination(request({ user: "ro‮ot" }))).toBe("ro⟨U+202E⟩ot@web");
+    expect(destination(request({ user: "ro\u202eot" }))).toBe("ro⟨U+202E⟩ot@web");
     expect(approvalTitle(request({ program_chain: ["cl\u0007aude"] }))).toContain("⟨U+0007⟩");
   });
 
@@ -2486,7 +2486,7 @@ describe("ApprovalCard", () => {
   });
 
   it("escapes hidden characters in names", () => {
-    expect(render(request({ host: "we‮b" }))).toContain("we⟨U+202E⟩b");
+    expect(render(request({ host: "we\u202eb" }))).toContain("we⟨U+202E⟩b");
   });
 });
 ```
