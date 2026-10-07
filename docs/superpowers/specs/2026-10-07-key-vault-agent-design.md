@@ -261,6 +261,8 @@ symlink 名稱,§15)。「程式」= 第一個不是 `ssh`、`ssh-keygen`、shel
 - 「Remember for 4 hours」(依這台的設定;「每次都問」的金鑰與未知主機沒有這個選項)。
 - 需要 passphrase 時,多一個輸入欄與「Remember on this computer」。
 - 「Deny」、「Allow」;要求系統驗證的金鑰,按 Allow 之後跳出 Touch ID/Windows Hello。
+- 一次只顯示最早的請求。新的請求出現後 0.7 秒內 Allow(Connect 的 Unlock)不能按,答完之後要等下一個請求真的換上來:
+  連點兩下不會答到使用者沒看到的下一個請求(可能是別的程式、別的主機,而且預設會記住)。Deny 隨時可以按。
 
 ### 7.5 主機編輯器與新增金鑰
 
