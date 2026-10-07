@@ -6750,6 +6750,9 @@ This job runs on `push` to `main`, on pull requests and on `workflow_dispatch`; 
 
 - [ ] **Step 4: Write the manual checklist**
 
+> After execution: the live list is `docs/superpowers/plans/2026-10-07-key-vault-agent-manual-verification.md`. The final fix round
+> added items 8, 17 and 21 (32 items); the copy below is the list as Task 13 first wrote it.
+
 Create `docs/superpowers/plans/2026-10-07-key-vault-agent-manual-verification.md`:
 
 ```markdown
