@@ -6740,7 +6740,8 @@ Edit `.github/workflows/test-windows.yml`: update the header comment to say it a
       - name: Key slot, vault and agent tests
         env:
           SSHELTER_REQUIRE_OPENSSH: "1"
-        run: cargo test --lib -- sync::slot_rules sync::slot_files vault:: agent::
+        # Quoted: an unquoted `vault:: agent::` is read as a YAML mapping and the workflow would not load.
+        run: "cargo test --lib -- sync::slot_rules sync::slot_files vault:: agent::"
 ```
 
 This job runs on `push` to `main`, on pull requests and on `workflow_dispatch`; nothing here pushes. The run happens when the branch is pushed with the user's authorization.
