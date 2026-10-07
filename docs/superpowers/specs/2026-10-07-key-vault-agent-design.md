@@ -226,32 +226,57 @@ symlink 名稱,§15)。「程式」= 第一個不是 `ssh`、`ssh-keygen`、shel
 
 ### 7.1 位置
 
-- 側邊欄最上方加「Hosts/Keychain」切換;Keychain 取代主畫面,左邊清單、右邊明細(Termius 的 Vaults 分頁)。
-- 工具列的 Keys 按鈕、Settings → Sync 的「Pick…」都打開 Keychain。舊的 Keys 對話框整併進來(產生、部署、複製公鑰)。
+- 側邊欄最上方加「Hosts｜Keychain」切換,記住上次選的(和側邊欄寬度一樣存起來,重開也記得)。選 Keychain 時,側邊欄是金鑰清單,主區塊是選到的金鑰的明細,
+  和 Hosts 的「主機清單 + 主機編輯器」同一種排法(使用者 2026-10-07 選定)。Termius 的導覽列 + 卡片格狀 + 右側面板在工具視窗的寬度下會擠,
+  卡片也放不下「金鑰放在哪、誰能用」的狀態;Termius 的金鑰只在 Termius 裡用,SSHelter 的金鑰給系統的 `ssh`、git、AI 工具用,這些狀態是必要的。
+- 取 Termius 的原則,不照抄排版:金鑰是集中在一處的獨立物件;主機連結金鑰;Export to host 一步完成(裝公鑰並連結,§7.3.1);
+  在原地新增與產生,不疊對話框。
+- 工具列的鑰匙按鈕切到 Keychain,不再開對話框。舊的 Keys 對話框與其中的「Keys used by synced hosts」區塊移除,內容併進 Keychain。
+  SP3 的兩個流程對話框保留(主機開始同步時問金鑰要不要同步、「Pick keys for this computer」),它們的挑金鑰與打開都帶到 Keychain 裡對應的金鑰;
+  「Pick keys for this computer」的說明改成「…or do it later in Keychain」。Settings → Sync 的「Pick…」關掉設定、切到 Keychain,選好第一把需要挑金鑰的。
 
 ### 7.2 清單
 
+上方:搜尋(名稱、類型、指紋)與「Generate key」。SSHelter 的 agent 有問題時(§6、§11),清單上方顯示問題與「Fix」。
+系統 ssh-agent 的「agent: N keys」那行拿掉,只在載入系統 ssh-agent 的金鑰檔上標「in ssh-agent」。
+
 三組:
 
-1. **In SSHelter**:保管庫的金鑰。標記:已同步(ⓢ)或只在這台、要求 Touch ID/Windows Hello、每次都問、需要 passphrase、
-   還沒同步到這台。
-2. **Each computer uses its own key**:SP3 的 `own` 插槽;這台還沒挑的,顯示「Pick a key on this computer」。
-3. **Key files in ~/.ssh**:還沒加入的金鑰檔,各有「Add to SSHelter」。
+1. **In SSHelter**:同步的金鑰(SP3 的 `synced` 插槽)。列上:名稱、類型、標記(Synced、Only in SSHelter、Needs a key、錯誤)。
+   計畫 2b 再加:要求 Touch ID/Windows Hello、每次都問、需要 passphrase。
+2. **Each computer uses its own key**:SP3 的 `own` 插槽;這台還沒挑的,顯示「Pick a key on this computer」;這台的金鑰在保管庫裡的,標「Only in SSHelter」。
+3. **Key files in ~/.ssh**:不在任何插槽裡的金鑰檔。計畫 2b 再加「Add to SSHelter」。
+
+插槽依它的模式分組(`synced` 在第 1 組,`own` 在第 2 組),金鑰在保管庫或是檔案只影響標記。帳戶裡已經沒有、這台還留著檔案的插槽,
+留在原本的組,標「Not in your sync account」,只提供刪除沒有主機用到的副本(SP3 的規則)。
 
 ### 7.3 明細
 
-- 名稱(可改,只改 `label`)、類型、指紋、公鑰(Copy public key)、建立時間、是否同步、有沒有 passphrase。
-- 用到它的主機:點一下切到那台主機。
-- On this computer:「Only in SSHelter」或「Also keep a file」;切到後者時提醒「任何程式都能不經核准使用這個檔案」。
-- 保護(跟著金鑰同步):「Ask every time」、「Require Touch ID」/「Require Windows Hello」。
-- passphrase:「Remembered on this computer」與「Forget」。
-- 動作:
-  - **Export to host…**(右鍵也有):選一台主機,把公鑰裝到它的 `authorized_keys`,並把這台主機連到這把金鑰
-    (沿用現有的 Deploy 流程,再寫入主機的 `IdentityFile`)。
+- 每一種都有:名稱、類型、指紋、「Copy public key」、「Export to host…」(§7.3.1)、用到它的主機(點一下切到 Hosts 並選到那台)。
+- 同步的金鑰:
+  - On this computer:「Only in SSHelter」或「Keep a file」;切到後者時提醒「任何程式都能不經核准使用這個檔案」。
+  - 其他電腦:各台用檔案、只在 SSHelter,或還沒拿到。
+  - SP3 的狀態訊息與動作(Use the synced key、Sync the new key、Stop syncing、Delete copy…;SP3 §6.3、§7.2)。
+- 自己的金鑰(`own`):這台用的是哪個檔案(或保管庫)、「Pick a key on this computer」、「Sync to your computers」。
+- 金鑰檔:路徑、是否在 ssh-agent 裡。不提供刪除(§7.6:使用者自己的原始檔一律不碰)。
+- 計畫 2b 再加:
+  - 改名(只改 `label`)、建立時間、有沒有 passphrase。
+  - 保護(跟著金鑰同步):「Ask every time」、「Require Touch ID」/「Require Windows Hello」。
+  - passphrase:「Remembered on this computer」與「Forget」。
   - Export private key…:存成檔案,可選擇加上 passphrase。
-  - Add a host for this key…(§6)。
-  - Sync to your computers/Stop syncing(沿用 SP3 §6.3)。
-  - Delete(§7.6)。
+  - Add a host for this key…(§6)、Delete(§7.6)。
+
+#### 7.3.1 Export to host…
+
+Termius 的「Export and Attach」:
+
+1. 選一台主機(只列真的主機,不列 `Host *` 之類的萬用區塊)。
+2. 沿用現有的 Deploy 流程(App 內或終端機),把公鑰裝到那台主機的 `authorized_keys`。
+3. 成功之後,把那台主機的 `IdentityFile` 換成這把金鑰:取代主機區塊裡原本的 `IdentityFile` 行,不動 `Host *` 等繼承來的設定。
+   確認畫面寫明「{host} will use {key} instead of {old keys}」(原本沒有 `IdentityFile` 時只寫「{host} will use {key}」)。
+   值寫插槽路徑(插槽的金鑰)或 `~/` 開頭的檔案路徑。
+4. 主機在同步的 space 裡:改完之後照 SP3 的規則處理這把金鑰(問要不要同步;插槽的金鑰本來就跨電腦通用)。
+5. 裝公鑰失敗就不改 `IdentityFile`。
 
 ### 7.4 核准視窗
 
@@ -284,7 +309,7 @@ symlink 名稱,§15)。「程式」= 第一個不是 `ssh`、`ssh-keygen`、shel
 ## 8. 從 SP3(0.17.0-5)搬遷
 
 - 更新後不自動改任何東西:主機照舊用現在的檔案連線。
-- 已同步的插槽在 Keychain 列為「In SSHelter」,這台標示為「Also keep a file」。上方提示「{N} keys can live only in SSHelter」,逐把決定:
+- 已同步的插槽在 Keychain 列為「In SSHelter」,這台標示為「Keep a file」。上方提示「{N} keys can live only in SSHelter」,逐把決定:
   - SSHelter 自己放的副本(`SyncedCopy`):換成 `.pub`,私鑰放進保管庫。
   - 連到使用者自己檔案的(`Linked`):問「Move into SSHelter」或「Keep the file too」。
 - 第一次有金鑰改成「只在 SSHelter」:寫入 `agent/config` 與 Include(§6),並建議開機自動啟動(§5.7)。
@@ -347,7 +372,14 @@ symlink 名稱,§15)。「程式」= 第一個不是 `ssh`、`ssh-keygen`、shel
 1. 保管庫與 agent 核心:保管庫檔、agent 協定、socket/pipe、核准規則與快取、核准視窗、passphrase、程式辨識、`agent/config` 與 Include、
    Connect,以及現有「Keys used by synced hosts」裡每個同步插槽的「Only in SSHelter」切換。做完就能實際試用:把一把同步的金鑰改成只在
    SSHelter,從終端機 `ssh`,看到核准視窗。
-2. Keychain 頁、主機編輯器挑金鑰、Export to host、新增與匯入(搬進來或保留檔案)、搬遷、`keyprefs`。
+2. 分兩段(使用者 2026-10-07 決定):
+   - **2a Keychain 頁**:§7.1–§7.3 的頁面、清單與明細(沿用現有的金鑰檔與插槽功能)、Export to host(§7.3.1),移除舊的 Keys 對話框。
+     「Generate key」照舊產生到 `~/.ssh`,2b 再改成直接進保管庫。後端只補「金鑰檔被哪些主機用到」與 Export 之後寫入主機的 `IdentityFile`。
+     做完就能以 beta 發佈。
+   - **2b 金鑰直接進保管庫**:新增與匯入(搬進來或保留檔案,§7.5)、產生直接進保管庫、主機編輯器挑金鑰、Add to SSHelter、
+     Export private key、Add a host for this key、改名與保護(`keyprefs`)、Delete(§7.6)、搬遷(§8)。也要做到計畫 1 留下的三件事
+     (`docs/superpowers/plans/2026-10-07-key-vault-agent-1-followups.md`):`vault:key` 帳戶帶世代、Keychain 列出孤兒項目與搬到旁邊的保管庫檔、
+     每台電腦記住這個插槽要放保管庫。
 3. 移除 MCP `run`、文件、平台收尾(Windows、Touch ID/Windows Hello、鎖定偵測、隱藏啟動)。
 
 ## 15. 查證紀錄
