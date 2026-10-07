@@ -6707,7 +6707,9 @@ fn a_one_shot_channel_lists_only_its_key_and_only_once() {
             let _ = session::serve(&mut stream, &connection);
         })
     };
-    let channel = oneshot::open(&agent.dir.path().join("run"), serve, Duration::from_secs(10)).unwrap();
+    // `late` 不會被呼叫(10 秒內就連上了);`channel` 要留到兩次 ssh-add 都跑完:沒有 `keep` 就丟掉會取消通道。
+    let channel =
+        oneshot::open(&agent.dir.path().join("run"), serve, Box::new(|| {}), Duration::from_secs(10), Duration::from_secs(10)).unwrap();
     #[cfg(unix)]
     let endpoint = channel.path.display().to_string();
     #[cfg(windows)]
@@ -6796,22 +6798,28 @@ server or a throwaway host entry; never a production key you can't replace. Reco
     `ssh -o IdentityAgent=… -o ForwardAgent=no web` and logs in without an approval window.
 20. With a passphrase key that is not remembered: "Unlock <key> to connect to <user>@web" with Cancel and Unlock.
 21. Connect on a host whose key is a normal file: unchanged (password auto-fill still works where it did).
+22. Connect on a host you haven't connected to before (or remove its line from `known_hosts` first), leave ssh's fingerprint
+    question open for more than a minute, then answer yes: ssh can't use the key ("communication with agent failed") and
+    SSHelter shows "Connect to web again"; Connect again logs in.
+23. With `ControlMaster auto` and `ControlPersist` set for `web`: a second Connect while the first session is open logs in through
+    the master, and no "Connect again" message appears, then or 10 minutes later.
 
 ## When SSHelter isn't there, or things break
 
-22. Quit SSHelter, `ssh web` from Terminal: ssh cannot use the key (it says so); reopen SSHelter and it works again.
-23. Start a second SSHelter (`--mcp-host` while the app runs): the first keeps answering; no error in the second.
-24. Remove the Include line from `~/.ssh/config` by hand: Keys shows "Hosts that use keys in SSHelter can't reach its agent." with
+24. Quit SSHelter, `ssh web` from Terminal: ssh cannot use the key (it says so); reopen SSHelter and it works again.
+25. Start a second SSHelter (`--mcp-host` while the app runs): the first keeps answering; no error in the second.
+26. Remove the Include line from `~/.ssh/config` by hand: Keys shows "Hosts that use keys in SSHelter can't reach its agent." with
     Fix. Fix puts the line back first; a sync round does not add it back on its own before you press Fix.
-25. Keep a file: the confirm says any program can use the file without asking; afterwards the private key is back in the slot, the
+27. Keep a file: the confirm says any program can use the file without asking; afterwards the private key is back in the slot, the
     host drops out of `agent/config`, and `ssh web` works without a window.
-26. Lose the vault: quit SSHelter, rename `vault.json` in SSHelter's data folder (next to `sync-state.json`), start SSHelter. After a sync
-    round the synced key is back in the vault (Only in SSHelter still works). Repeat with a key that is not synced: the slot asks for
+28. Lose the vault: quit SSHelter, rename `vault.json` in SSHelter's data folder (next to `sync-state.json`), start SSHelter. After a sync
+    round the synced key is back in the vault (Only in SSHelter still works); a Connect on `web` before that round finishes opens
+    no terminal and says the key isn't in SSHelter on this computer. Repeat with a key that is not synced: the slot asks for
     a key again.
 
 ## Windows only
 
-27. The pipe `\\.\pipe\sshelter-agent-<hex>` exists only while SSHelter runs; `ssh web` from PowerShell gets the window
+29. The pipe `\\.\pipe\sshelter-agent-<hex>` exists only while SSHelter runs; `ssh web` from PowerShell gets the window
     ("WindowsTerminal → pwsh → ssh").
 ```
 
