@@ -1,5 +1,8 @@
 # Key vault and agent, plan 1 — manual verification
 
+**Note:** plan 2a replaced the controls that items 2, 3, 8, 21, 29, 30 and 31 name (the Keys dialog, Only in SSHelter, Keep a file)
+with the Keychain's *Move*, *Pick a key on this computer…* and *Export private key…*; check a 2a build with `2026-10-07-key-vault-agent-2a-manual-verification.md`.
+
 Run on a Mac and on a Windows computer (the user's Windows has OpenSSH 9.5), with a beta build of this branch. Use a test
 server or a throwaway host entry; never a production key you can't replace. Record each item as pass / fail with a note.
 
