@@ -100,8 +100,10 @@
   - 在保管庫的插槽上換金鑰(挑別把、改用同步的那把):新的取代;舊的在保管庫裡改存成 retired 項目,不自動刪除
     (同 SP3「私鑰不自動刪除」;2b 的 Keychain 列出它們,可匯出或刪除)。
   - SP3 的 `Linked`、`SyncedCopy` 只出現在三種情況:更新前留下的(§8)、保管庫不能用時同步金鑰的暫時落地(§11)、舊版的電腦。
-- 沒加入同步帳戶也能用:保管庫的金鑰在 `key_slots` 裡有一筆本機記錄(不在任何帳戶)。之後同步的主機用到它時,
-  沿用 SP3 的 Sync key 對話框把它收編進帳戶(`slot_setup::adopt_slot`)。
+- 沒加入同步帳戶也能用:保管庫的金鑰在 `key_slots` 裡有一筆本機記錄(不在任何帳戶,`LocalSlot::local_only`)。之後同步的主機用到它時,
+  沿用 SP3 的 Sync key 對話框把它收編進帳戶(`slot_setup::adopt_slot`)。帳戶的 `device` 記錄不列這種金鑰(只在這台的金鑰不告訴帳戶)。
+  它的保管庫項目不見了也不移除記錄:沒有別處可以取回,清單照舊列出、標錯誤(2026-10-08 規劃 2b-1 時裁定)。
+  沒有帳戶時,每次同步嘗試照樣維護這台的插槽(`.pub`、保管庫還在不在),不必等加入帳戶。
 - 記在這台的 passphrase:系統 Keychain(account `vault:passphrase:<插槽 id>`),永不同步。
 - 這台電腦只能更嚴的設定(保管庫檔頭):「這台一律每次都問」、記住多久。
 - 記住的核准只在記憶體(§5.3)。
@@ -321,11 +323,16 @@ Termius 的「Export and Attach」:
 - 主機的 `IdentityFile` 可以從 Keychain 挑一把金鑰(填入插槽路徑),仍可手打路徑(Termius 的「主機連結金鑰」)。
 - 「New key」:貼上私鑰、拖放或選擇檔案、從 `~/.ssh` 匯入(「Other key files」的「Import」)。「Generate key」:Ed25519(預設)、
   RSA 3072/4096、ECDSA P-256,可設 passphrase。都直接進保管庫,不留檔案;「Generate a key file…」同時移除。
-- 不在帳戶的本機金鑰(§4.3「沒加入同步帳戶也能用」)在這時加入,清單標「This computer only」。
+- 不在帳戶的本機金鑰(§4.3「沒加入同步帳戶也能用」)在這時加入,清單標「This computer only」。已經在 SSHelter 的金鑰(同指紋)不再加一次,
+  說明它叫什麼。新增與產生在 Keychain 的主區塊原地進行(§7.1),不開對話框。
 - 把既有的金鑰檔加入保管庫時,問:
   - 「Move into SSHelter」:匯入並核對指紋之後,移除原檔;確認視窗寫明「保管庫將是這把金鑰在這台電腦上唯一的一份,用 Export 可以再拿回檔案」。
-  - 「Keep the file too」:原檔留著,畫面標示「這個檔案任何程式都能不經核准使用」。
-- 建立「只在這台」的金鑰時,提醒匯出一份備份。
+    `IdentityFile` 指到這個檔案的主機,同一步改指到 SSHelter 的這把(畫面先列出它們);有主機改不了(同名有好幾份、在還沒跑完第一輪的 space)
+    就整個不改、原檔留著,畫面說明原因。原檔是 `ssh` 預設會試的檔名(例如 `~/.ssh/id_ed25519`)時,提醒沒寫 `IdentityFile` 的主機之後找不到它。
+    只移除私鑰檔,旁邊的 `.pub` 留著(2026-10-08 規劃 2b-1 時裁定)。
+  - 「Keep the file too」:原檔留著,畫面標示「這個檔案任何程式都能不經核准使用」。主機不改。
+- 建立「只在這台」的金鑰時,提醒匯出一份備份:這種金鑰的明細一直顯示這個提醒。
+- 只在這台、沒有主機用到的金鑰可以直接刪除(2b-1);完整的刪除(有主機在用、同步的金鑰)在 §7.6(2b-2)。
 
 ### 7.6 刪除
 
@@ -382,7 +389,7 @@ Termius 的「Export and Attach」:
 | 核准逾時、拒絕、passphrase 錯三次、系統驗證取消 | 拒絕這次請求;`ssh` 繼續試別的方式或失敗 |
 | 這台的保管庫沒有這台主機要用的金鑰 | Connect 不啟動,說明原因 |
 | 一次性通道的 60 秒過了,`ssh` 才來要金鑰 | 不提供;畫面請使用者再按一次 Connect(§5.6) |
-| 在自己的終端機連用保管庫金鑰的主機,而 SSHelter 沒開 | `ssh` 顯示 `no such identity`;主機頁提示「This host's key is in SSHelter; open SSHelter to connect」 |
+| 在自己的終端機連用保管庫金鑰的主機,而 SSHelter 沒開 | `ssh` 顯示 `no such identity`;主機頁的 IdentityFile 底下事先說明「{key} is in SSHelter: ssh can use it only while SSHelter is running.」(主機頁只在 SSHelter 開著時看得到,所以是事先說明,不是事後提示;2026-10-08 規劃 2b-1 時裁定) |
 
 ## 12. 測試
 
@@ -424,6 +431,13 @@ Termius 的「Export and Attach」:
    - **2b 把其他金鑰帶進來**:New key(貼上、檔案、從 `~/.ssh` 匯入,Move 或 Keep the original file,決策 #5)、產生直接進保管庫
      (移除「Generate a key file…」)、不在帳戶的本機金鑰、主機編輯器挑金鑰、Add a host for this key、改名與保護(`keyprefs`)、
      passphrase 的記住與 Forget、Delete(§7.6)、列出 retired 與孤兒項目和搬到旁邊的保管庫檔(可匯出或刪除)。
+     2b 太大,再分兩份計畫(2026-10-08 規劃時裁定),各自能以 beta 發佈:
+     - **2b-1 帶金鑰進來**:New key、Generate key、只在這台的金鑰(`local_only`、沒有帳戶時的維護、保管庫項目不見時留著記錄)、
+       Sync key 對話框收編只在這台的金鑰與之前帳戶留下的保管庫金鑰、主機編輯器挑金鑰與 IdentityFile 底下的說明、Add a host for this key、
+       明細的建立時間與有沒有 passphrase、永遠搬不進保管庫的檔案說明原因、刪除只在這台而且沒有主機用到的金鑰。
+     - **2b-2 管理金鑰**:改名與保護(`keyprefs`)、這台的 agent 設定畫面(記住多久、一律每次都問)、passphrase 的記住與 Forget、
+       Delete(§7.6)、列出 retired 與孤兒項目和搬到旁邊的保管庫檔。保護只做「Ask every time」:「Require Touch ID/Windows Hello」
+       要和系統驗證一起做,放在計畫 3,免得出現沒有作用的開關。
 3. 移除 MCP `run`、AI Access 的設定 prompt(§9)、文件、平台收尾(Windows、Touch ID/Windows Hello、鎖定偵測、隱藏啟動)。
 
 ## 15. 查證紀錄
