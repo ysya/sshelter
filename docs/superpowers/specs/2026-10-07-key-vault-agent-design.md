@@ -1,7 +1,8 @@
 # SSHelter 金鑰保管庫與 SSH agent(金鑰路線第 2 階段)設計
 
 - 日期:2026-10-07
-- 狀態:待使用者審閱(2026-10-07 修訂:金鑰一律在 SSHelter、Keychain 的排版、計畫 2 切成 2a 與 2b)
+- 狀態:已核准(2026-10-07 修訂:金鑰一律在 SSHelter、Keychain 的排版、計畫 2 切成 2a 與 2b)。計畫 1、2a 已完成
+  (beta 0.17.0-6、0.17.0-7);2b、3 待做
 - 前置:SP3 金鑰插槽(`docs/superpowers/specs/2026-10-05-sp3-key-slots-design.md`,已在 beta 0.17.0-5)
 - 調查:`docs/superpowers/specs/2026-10-07-key-vault-research.md`(金鑰管理與 agent 核准)、
   `docs/superpowers/specs/2026-10-07-key-approval-scope-research.md`(核准設定放在哪裡)
@@ -348,6 +349,10 @@ Termius 的「Export and Attach」:
 - 移除 `run`,連同它的核准視窗、允許主機清單與指令紀錄。MCP 保留 `list_hosts` 與 `get_effective_config`(不碰金鑰)。
 - 還在呼叫 `run` 的用戶端:回錯誤,說明已移除,改用 `ssh` 加上 SSHelter 的核准。
 - Settings 的 AI Access 頁改寫:AI 工具用自己的 `ssh`,經 SSHelter 的 agent 取用保管庫的金鑰,每次經過核准視窗。
+- AI Access 頁提供一段可以複製的設定 prompt(使用者 2026-10-08):貼給任何 AI 工具(Claude Code、Codex、Cursor…),讓它用自己的方式
+  把 SSHelter 加成本機的 stdio MCP 伺服器(名稱 `sshelter`,指令是 SSHelter 的執行檔加 `--mcp`),並說明怎麼配合 SSHelter:用 `list_hosts`
+  查主機、用自己的 `ssh <alias>` 連線、用到 SSHelter 的金鑰時會跳出核准視窗。prompt 只負責設定;金鑰的使用一律由使用者在核准視窗決定。
+  各工具的精確設定指令(例如現有的 `codex mcp add`)仍列在旁邊,寫進介面之前對照各工具當時的文件。
 - README「AI Access (MCP)」改寫:保管庫裡的金鑰,AI 不經核准就用不到;匯出的檔案與你自己在 `~/.ssh` 的金鑰檔仍然可以被任何程式直接使用。
 
 ## 10. 平台
@@ -419,7 +424,7 @@ Termius 的「Export and Attach」:
    - **2b 把其他金鑰帶進來**:New key(貼上、檔案、從 `~/.ssh` 匯入,Move 或 Keep the original file,決策 #5)、產生直接進保管庫
      (移除「Generate a key file…」)、不在帳戶的本機金鑰、主機編輯器挑金鑰、Add a host for this key、改名與保護(`keyprefs`)、
      passphrase 的記住與 Forget、Delete(§7.6)、列出 retired 與孤兒項目和搬到旁邊的保管庫檔(可匯出或刪除)。
-3. 移除 MCP `run`、文件、平台收尾(Windows、Touch ID/Windows Hello、鎖定偵測、隱藏啟動)。
+3. 移除 MCP `run`、AI Access 的設定 prompt(§9)、文件、平台收尾(Windows、Touch ID/Windows Hello、鎖定偵測、隱藏啟動)。
 
 ## 15. 查證紀錄
 
