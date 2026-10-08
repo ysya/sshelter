@@ -97,7 +97,8 @@ as pass / fail with a note.
     window that was minimized or hidden reads the config again when it comes back, and then the write works), change `~/.ssh/config`
     outside SSHelter (`echo '# test' >> ~/.ssh/config` in a terminal), then Deploy. The key is deployed, but writing the host's
     IdentityFile fails with "Failed to save host" (the file changed on disk since it was loaded), and the result screen offers "Use this
-    key — IdentityFile …".
+    key — IdentityFile …". Press it: it says "IdentityFile … written to the host config.", the host has the one `IdentityFile` line, and
+    the line you added is still in `~/.ssh/config`.
 34. Export to host… on a key file in ~/.ssh: "In Terminal (ssh-copy-id)" is offered on the Mac and not on Windows; it runs ssh-copy-id
     and changes no settings. A key in SSHelter offers only In the app.
 35. Export to host on a host in a synced space with a key file: the SP3 "sync this key?" question follows.
