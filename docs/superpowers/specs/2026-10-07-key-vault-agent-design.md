@@ -71,9 +71,12 @@
 - 位置:`fsutil::app_data_root()`(和 `sync-state.json` 同一處)的 `vault.json`。寫入一律原子(暫存檔 → 設好權限 → rename),
   檔案只有擁有者能讀寫(Unix 0600;Windows 只給目前使用者的 DACL,同 SP3 的插槽檔)。
 - 加密:每一筆以 XChaCha20-Poly1305 個別加密,AAD 是 `sshelter-vault-v1` 加上插槽 id;金鑰是 32 bytes 的隨機值,
-  存在系統 Keychain(service `SSHelter`,account `vault:key`)。沒有系統 Keychain 可用時,保管庫停用,同步的金鑰暫時寫成檔案(§11)。
+  存在系統 Keychain(service `SSHelter`)裡這個保管庫自己的 account `vault:key:<16 個 hex>`,名稱記在檔頭的 `key_account`(格式第 2 版)。
+  新的金鑰一律放在新的 account,不寫到已經有名字的 account 上:系統 Keychain 誤報「沒有這筆」時,搬到旁邊的保管庫檔仍解得開。
+  計畫 1 寫的保管庫檔沿用 account `vault:key`(檔頭沒有 `key_account`,格式第 1 版),舊版照常開啟。
+  沒有系統 Keychain 可用時,保管庫停用,同步的金鑰暫時寫成檔案(§11)。
 - 一筆的內容:私鑰原文(OpenSSH 格式,有 passphrase 的仍是加密狀態)、指紋、公鑰、來源(產生、匯入、同步)、加入時間。
-- 檔頭(明文、不含祕密):格式版本,以及這台電腦的 agent 設定(記住多久、這台一律每次都問)。
+- 檔頭(明文、不含祕密):格式版本、金鑰所在的 account 名稱(`key_account`),以及這台電腦的 agent 設定(記住多久、這台一律每次都問)。
 - 讀不懂的保管庫檔:不覆寫,搬到旁邊保留(同 Sync v2 對讀不懂的狀態檔的處理),保管庫進入錯誤狀態(§11)。
 
 ### 4.2 帳戶 chain
@@ -367,7 +370,7 @@ Termius 的「Export and Attach」:
 |---|---|
 | agent 開不起來(路徑太長、權限、pipe 名稱被佔) | Keychain 顯示錯誤;用保管庫金鑰的主機暫時連不上;你自己的金鑰檔不受影響 |
 | Include 那一行被刪 | 不自動加回;顯示提示與「Fix」(§6) |
-| 保管庫檔讀不懂、或系統 Keychain 裡的 `vault:key` 不見 | 不覆寫,搬到旁邊保留;同步過的金鑰從帳戶重新取回;只在這台的金鑰只能靠匯出的備份 |
+| 保管庫檔讀不懂、或系統 Keychain 裡保管庫的金鑰不見 | 不覆寫,搬到旁邊保留;同步過的金鑰從帳戶重新取回;只在這台的金鑰只能靠匯出的備份 |
 | 系統 Keychain 不可用 | 保管庫停用;同步的金鑰暫時寫成檔案,列上標「File for now」;保管庫恢復之後,用搬遷提示的「Move」搬回保管庫(§8) |
 | 搬遷時一把搬不進去 | 其他照搬;那把留著檔案,列上顯示原因 |
 | Windows 上 Git 用自己附的 `ssh` | 連不到 agent;Keychain 提示改 `core.sshCommand`(§10) |

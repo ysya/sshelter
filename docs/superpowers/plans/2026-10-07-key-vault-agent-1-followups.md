@@ -9,7 +9,8 @@ Spec: `docs/superpowers/specs/2026-10-07-key-vault-agent-design.md`.
 - **Never overwrite `vault:key`.** If the keychain wrongly reports "no entry", plan 1 sets the vault file aside as
   `vault.keyless-<ms>.json`, and the next `put` stores a new key under the same account. The set-aside file can then never be
   opened. That is harmless in plan 1, where every vault key has another copy, but not once the vault holds the only copy. Use
-  generation-suffixed accounts so a new key never replaces an old one.
+  generation-suffixed accounts so a new key never replaces an old one. **Done in 2a:** a new vault key gets an account of its own,
+  `vault:key:<16 hex>`, recorded in the file header (`key_account`, format version 2); plan 1's files keep `vault:key` (version 1).
 - **Show what plan 1 hides.** The Keychain page lists orphan vault entries (no slot points to them) and the set-aside files
   `vault.keyless-*` / `vault.unreadable-*`.
 - **Remember the delivery choice per computer and slot.** Today, if the vault is lost while another computer changes the slot's
@@ -22,8 +23,10 @@ Spec: `docs/superpowers/specs/2026-10-07-key-vault-agent-design.md`.
   - Move into SSHelter or Keep the file too: an own-mode slot's original key file stays in `~/.ssh` after a move into the vault.
   - On Windows' copy fallback, SSHelter's copy is renamed to `.previous-*` instead of removed when the original still exists.
 - **Recognizing vault keys.**
-  - `existing_slot_for` doesn't recognize an own key that is held in the vault (import).
-  - `device_slot` labels every vault key "synced copy" in the other-computers list.
+  - `existing_slot_for` doesn't recognize an own key that is held in the vault (import). **Done in 2a:** setup reuses a vault
+    slot's key (`existing_slot_for` matches a slot in the vault by its fingerprint).
+  - `device_slot` labels every vault key "synced copy" in the other-computers list. **Done in 2a:** the device record carries
+    `in_vault`.
   - `delete_copy`'s wording for a vault key.
 - **Leftover files.** A private key file left by the user at a vault slot's path can only be removed by hand. The UI could say so.
 - **When this computer can't use the key.**
@@ -37,7 +40,8 @@ Spec: `docs/superpowers/specs/2026-10-07-key-vault-agent-design.md`.
 - **Agent settings UI.** `Vault::set_settings` is `#[cfg(test)]` today. Remove the attribute when the settings screen needs it.
 - **Hiding "Only in SSHelter" for keys the agent can't use.** Do this once slot views carry the key type: sk-*, DSA, an
   unsupported cipher, or a key ssh-key can't parse. Own-mode payloads carry no key type today; the backend already refuses
-  these keys with a message.
+  these keys with a message. **Done in 2a:** the control is gone; keys SSHelter's agent can't hold aren't moved into the vault
+  (setup, Move) and aren't marked File for now.
 
 ## Plan 3 (MCP `run` removal, docs, Windows, Touch ID / Windows Hello, lock detection, hidden launch)
 

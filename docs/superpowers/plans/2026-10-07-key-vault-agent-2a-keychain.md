@@ -1434,7 +1434,7 @@ Spec §7.3.2. This is the only way a key in SSHelter becomes a file again. The R
 **Interfaces:**
 - Consumes:
   - `vault_text` (slots.rs, plan 1);
-  - `slot_files::write_private`;
+  - `slot_files::write_private` (as planned; the final `save_export` writes the chosen file directly, see the note after step 2);
   - `ssh_key::PrivateKey::{from_openssh, is_encrypted, encrypt, to_openssh}`;
   - `rand_core::OsRng`.
 - Produces:
@@ -1595,6 +1595,12 @@ pub fn save_export(path: &Path, home: &Path, text: &str) -> Result<(), AppError>
     crate::sync::slot_files::write_private(path, text.as_bytes())
 }
 ```
+
+> **Note (final implementation):** `save_export` doesn't use `slot_files::write_private`, whose temporary file inherits the
+> folder's permissions and is meant for SSHelter's own folders. After `check_destination` it writes the chosen file directly
+> (`write_export`): a new file that is owner-only before its first byte (Unix 0600 at creation; on Windows opened exclusively and
+> restricted to the owner before it is filled). A file or symlink already at that name is replaced, a folder is refused
+> (`EXPORT_FOLDER_MESSAGE`).
 
 3. `src-tauri/src/sync/slots.rs`. Add after `vault_text`:
 
