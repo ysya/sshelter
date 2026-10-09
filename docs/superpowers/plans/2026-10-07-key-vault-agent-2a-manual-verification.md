@@ -136,6 +136,6 @@ as pass / fail with a note.
 45. On Windows without a sync account (after item 43), start SSHelter a second time while it runs. In the second window, Delete copy on a
     key no host uses (or Move, or Move into SSHelter, when offered) refuses with "Sync is running in another SSHelter process — quit it to
     use sync here" and changes nothing: the first window still shows the key as it was.
-    Note: in release and beta builds from the single-instance fix (`fix/mcp-single-instance`) on, a second launch hands over to the
+    Note: in release and beta builds from 0.17.0-8 on, a second launch hands over to the
     running SSHelter: check that instead (no second process or window; the running window comes to the front). As written, this item
     applies only to builds before that fix and to debug builds (`tauri dev`), which don't register single instance.

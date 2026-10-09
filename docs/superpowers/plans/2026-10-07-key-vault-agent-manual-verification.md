@@ -64,7 +64,7 @@ server or a throwaway host entry; never a production key you can't replace. Reco
 
 27. Quit SSHelter, `ssh web` from Terminal: ssh cannot use the key (it says so); reopen SSHelter and it works again.
 28. Start a second SSHelter (`--mcp-host` while the app runs): the first keeps answering; no error in the second.
-    Note: in release and beta builds from the single-instance fix (`fix/mcp-single-instance`) on, a second launch hands over to the
+    Note: in release and beta builds from 0.17.0-8 on, a second launch hands over to the
     running SSHelter: check that instead (no second process, no window, and the first keeps answering). As written, this item applies
     only to builds before that fix and to debug builds (`tauri dev`), which don't register single instance.
 29. Remove the Include line from `~/.ssh/config` by hand: Keys shows "Hosts that use keys in SSHelter can't reach its agent." with

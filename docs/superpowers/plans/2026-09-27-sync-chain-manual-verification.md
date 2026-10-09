@@ -60,7 +60,7 @@ entry all follow the OS user, so two processes in one account would fight over t
     finishes, and the shadow panel then offers "Keep as <alias>-local" / "Remove local".
 20. Two instances: start a second SSHelter process → it shows "Sync is running in another SSHelter
     process…" and changes nothing; after quitting the first and restarting, sync works there.
-    Note: in release and beta builds from the single-instance fix (`fix/mcp-single-instance`) on,
+    Note: in release and beta builds from 0.17.0-8 on,
     a second launch hands over to the running SSHelter: check that instead (no second process; the
     running window comes to the front). As written, this item applies only to builds before that
     fix and to debug builds (`tauri dev`), which don't register single instance.
