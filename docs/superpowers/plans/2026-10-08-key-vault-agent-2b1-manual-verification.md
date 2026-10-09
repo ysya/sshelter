@@ -12,18 +12,25 @@ account. A step marked Mac or Windows is for that computer only. The Windows pas
 ## Setup
 
 1. Two computers (A and B) in one sync account, both on this build, Personal on for both, and the test server reachable from both. On
-   A and B back up `~/.ssh/config` (`cp ~/.ssh/config ~/.ssh/config.before-2b1`) and make a scratch folder outside `~/.ssh` for keys you
-   paste or choose (`mkdir ~/sshelter-test`; Windows: `mkdir $HOME\sshelter-test`). Many items add a host by hand to `~/.ssh/config`, in
-   this shape (HostName and User are your test server's):
+   A and B back up `~/.ssh/config` (`cp ~/.ssh/config ~/.ssh/config.before-2b1`). On the test server back up `~/.ssh/authorized_keys`
+   (`cp ~/.ssh/authorized_keys ~/.ssh/authorized_keys.before-2b1`): every `.pub` you add goes there, and the clean-up at the end puts
+   the copy back. Make a scratch folder outside `~/.ssh` for keys you paste or choose (`mkdir ~/sshelter-test`; Windows:
+   `mkdir $HOME\sshelter-test`). Many items add a host by hand to `~/.ssh/config`, in this shape (HostName and User are your test
+   server's):
    ```
    Host <alias>
      HostName <test server>
      User <user>
      IdentityFile <key file>
    ```
-   Press Reload from disk (the toolbar button) after every hand edit, and remove the host blocks you made by hand when their item is
-   done. A host you add in Personal also reaches B and would clutter its checks, so remove it when its item is done too, unless a later
-   item names it.
+   Press Reload from disk (the toolbar button) after every hand edit, and remove what you added by hand (host blocks, IdentityFile
+   lines, Match blocks) when its item is done. A host you add in Personal also reaches B and would clutter its checks, so remove it
+   when its item is done too, unless a later item names it. "Clean up" at the end lists everything the items create.
+
+   Look at your real config before you start: `grep -n IdentityFile ~/.ssh/config`, and the same in the files it includes. An
+   IdentityFile value with a `%` token (`%h`), a `${VAR}` or a relative path is one SSHelter can't resolve, and it can make a Move keep
+   its file (the reason in item 19) for keys you didn't expect. Comment such lines out while you test (Reload from disk) and put them
+   back afterwards.
 2. Update both computers to this build. Nothing changes by itself: the Keychain lists the keys it had with the same badges, and `ssh`
    to the hosts that use them works as before. Open the Keychain with the toolbar's key button or the `Hosts | Keychain` switch at the
    top of the sidebar: "In SSHelter" has two buttons beside its title, "New key" and "Generate key".
@@ -56,8 +63,8 @@ account. A step marked Mac or Windows is for that computer only. The Windows pas
      with .pub." and "Add to SSHelter" is off.
    - Make a key with a passphrase (`ssh-keygen -t ed25519 -f ~/sshelter-test/pass_key`, passphrase `test-pass`) and paste it as
      `pass_key`: it is added, and its "Passphrase" says "Yes". Item 25 logs in with it.
-5. **The same key twice.** Paste the same key again under another name (`paste_again`): "Could not add the key" says "This key is
-   already in SSHelter as paste_test." Nothing is added.
+5. **The same key twice.** Put the same key on the clipboard again (item 4 replaced it; use the item 3 command) and paste it under
+   another name (`paste_again`): "Could not add the key" says "This key is already in SSHelter as paste_test." Nothing is added.
 
 ## New key: from a file
 
@@ -72,11 +79,11 @@ account. A step marked Mac or Windows is for that computer only. The Windows pas
    - Start on "Paste" with some text in the box and drop a file: the form switches to "From a file" with that file. Dropping two files
      at once does nothing, and neither does dropping while another key's detail or the Generate key form is showing.
    - "Cancel": the main pane says "No key selected" and nothing was added.
-7. **Keep the file too.** Make `ssh-keygen -t ed25519 -f ~/.ssh/keep_key`, add a host block `keephost` that names it, and Reload from
-   disk. New key, From a file, `~/.ssh/keep_key`, press "Keep the file too": the form says "The file stays. Any program can use it
-   without asking." and no longer lists `keephost`. Press "Add to SSHelter": it is added at once, with no confirm. The toast says
-   "keep_key is in SSHelter" with "The file stays: any program can use it without asking." `~/.ssh/keep_key` is still there and
-   `keephost` still names `~/.ssh/keep_key`. `ssh keephost` logs in without an approval window.
+7. **Keep the file too.** Make `ssh-keygen -t ed25519 -f ~/.ssh/keep_key` (`keep_key.pub` on the test server), add a host block
+   `keephost` that names it, and Reload from disk. New key, From a file, `~/.ssh/keep_key`, press "Keep the file too": the form says
+   "The file stays. Any program can use it without asking." and no longer lists `keephost`. Press "Add to SSHelter": it is added at
+   once, with no confirm. The toast says "keep_key is in SSHelter" with "The file stays: any program can use it without asking."
+   `~/.ssh/keep_key` is still there and `keephost` still names `~/.ssh/keep_key`. `ssh keephost` logs in without an approval window.
 8. **Move into SSHelter.** Make `ssh-keygen -t ed25519 -f ~/.ssh/move_key` (`.pub` on the test server), add a host block `movehost`
    that names `~/.ssh/move_key`, and Reload from disk. New key, From a file, `~/.ssh/move_key`: with "Move into SSHelter" pressed the
    form says "SSHelter keeps the only copy on this computer and removes the file. Export private key… gets a file back." and
@@ -98,10 +105,11 @@ account. A step marked Mac or Windows is for that computer only. The Windows pas
    - With "Keep the file too" pressed, and for a pasted key (item 3), there is no confirm: the key is added at once.
    - While the confirm is open, drag another key file onto the window: it is ignored. The confirm still names the first file, and after
      "Cancel" the form still shows the first file.
-   - A long path wraps. Make one throwaway key in nested folders so that its full path is over 100 characters (for example
-     `~/sshelter-test/a-folder-with-a-long-name/another-folder-with-a-long-name/yet-another-long-folder/long_key`), and another with a
-     70-character file name without hyphens or spaces. For each, the confirm's text wraps inside the dialog; nothing is cut off or runs
-     past its edge.
+   - A long path wraps. Make a throwaway key in nested folders so that its full path is over 100 characters (for example
+     `~/sshelter-test/a-folder-with-a-long-name/another-folder-with-a-long-name/yet-another-long-folder/long_key`): the confirm's text
+     wraps inside the dialog and nothing is cut off or runs past its edge. Then try a key whose file name is 70 characters long without
+     hyphens or spaces: the confirm is expected to overflow until it gets `break-all`; record that as a known fail and don't fail the
+     item for it.
 10. **Move and a `Host *` block.** Make `ssh-keygen -t ed25519 -f ~/.ssh/star_key` and add this to the end of `~/.ssh/config` (it makes
     every host use the key, so remove it afterwards), then Reload from disk:
     ```
@@ -112,8 +120,9 @@ account. A step marked Mac or Windows is for that computer only. The Windows pas
     blocks count as "more than one copy" and the Move would keep the file (item 16).
     New key, From a file, `~/.ssh/star_key`: the form says "* will use the key in SSHelter." Move it. The `Host *` block now reads
     `IdentityFile ~/.ssh/sshelter/keys/star_key-<8 hex>` and `~/.ssh/star_key` is gone. `~/.ssh/sshelter/agent/config` lists
-    `Host *`, so every `ssh` goes through SSHelter's agent until you undo this. Remove the line (or the block), Reload from disk, and
-    Delete key… the key (item 36).
+    `Host *` with `IdentityAgent` and `IdentitiesOnly yes`, so until you undo this every `ssh` asks SSHelter's agent instead of your own
+    ssh-agent and offers only the keys that an IdentityFile line names: your own agent keys are not offered to any host. Remove the
+    line (or the block) right after the check, Reload from disk, and Delete key… the key (item 36).
 11. **Move with a default identity file.** Pick a key that ssh tries by itself: `~/.ssh/id_ed25519`, or a throwaway
     `~/.ssh/id_ecdsa` (`ssh-keygen -t ecdsa -f ~/.ssh/id_ecdsa`; ssh offers it to every host, so remove it afterwards). If you use your
     real default key, press "Cancel" after reading the form and don't add it. With "Move into SSHelter" pressed the form says "ssh also
@@ -133,19 +142,21 @@ account. A step marked Mac or Windows is for that computer only. The Windows pas
       again."
 14. **A key file an SP3 slot links to.** Make `ssh-keygen -t ed25519 -f ~/.ssh/linked_key`. In Personal add a host `linkedhost` that
     names it (New host with Target file "Personal", then set IdentityFile in the editor with the key button and Save). When "Keys used
-    by synced hosts" opens, press "Keep on this computer". The Keychain lists `linked_key` with "File for now" and the banner "1 key
-    can move into SSHelter"; don't press Move. New key, From a file, `~/.ssh/linked_key`: under the file line it says "This key is
-    already in SSHelter as linked_key." and "Add to SSHelter" is off. Paste the file's text instead: "Could not add the key" says
-    "This key is already in SSHelter as linked_key." Afterwards remove `linkedhost` (or B will ask for a key for it) and use "Delete
-    copy" on the `linked_key` row.
+    by synced hosts" opens, press "Keep on this computer". The Keychain lists `linked_key` with "File for now" and the banner counts
+    it ("1 key can move into SSHelter" when no other slot is File for now); don't press Move. New key, From a file,
+    `~/.ssh/linked_key`: under the file line it says "This key is already in SSHelter as linked_key." and "Add to SSHelter" is off.
+    Paste the file's text instead: "Could not add the key" says "This key is already in SSHelter as linked_key." Afterwards remove
+    `linkedhost` (or B will ask for a key for it); the `linked_key` row then reads "Not used on this computer".
 15. **The config changed on disk.** Make `ssh-keygen -t ed25519 -f ~/.ssh/drift_key`, add a host block `drifthost` that names it, and
     Reload from disk. New key, From a file, `~/.ssh/drift_key`. Keep SSHelter's window in view beside your editor or terminal (a window
     that was minimized or hidden reads the config again when it comes back, and then there is nothing to refuse). In the other editor
-    add a second host block `ghost` to `~/.ssh/config` that also names `~/.ssh/drift_key`, and do not reload in SSHelter.
+    add a second host block `ghost` to `~/.ssh/config` that also names `~/.ssh/drift_key`, and do not reload in SSHelter. Stay in the
+    Keychain: the "Changed on disk" banner only shows in Hosts with a host selected, and switching there would lose the New key form.
     - Press "Add to SSHelter" and confirm the Move. Before anything is added the toast "Could not add the key" says "Your SSH config
       changed on disk since SSHelter loaded it. Reload it, then try again." The key is not in the list, `~/.ssh/drift_key` is still
       there, and the form still holds the file and name.
-    - Press Reload on the "Changed on disk" banner ("Config reloaded from disk"), then "Add to SSHelter" and the confirm again: the Move
+    - Press the toolbar's Reload from disk (toast "Reloaded from disk"). The form keeps its file and name, and it still lists only
+      `drifthost` until you choose the file again; the Move rewrites both hosts either way. "Add to SSHelter" and confirm: the Move
       works, and `drifthost` and `ghost` both have the new slot path.
 
 ## When Move keeps the file
@@ -160,33 +171,36 @@ it and repeat the item if you miss it. Remove what you added and Delete key… t
 16. **A host with several copies.** `ssh-keygen -t ed25519 -f ~/.ssh/dup_key`, and two host blocks named `dup` in `~/.ssh/config`, both
     with `IdentityFile ~/.ssh/dup_key`. The form lists `dup` once. Reason: "The file stays: dup have more than one copy, so SSHelter
     didn't change them."
-17. **A host in a space that hasn't finished its first sync.** Needs a space this computer has off: if there is none, make one on the
-    other computer (Settings → Sync → Spaces → New space…, named "Work") and leave it off here. Turn the network off, then turn "Work"
-    on in Settings → Sync → Spaces: its row has not finished syncing (it reads "Syncing for the first time…", or shows a relay error
-    while you are offline). Make `ssh-keygen -t ed25519 -f ~/.ssh/early_key` and add a host `early` to Work's file (New host, Target
-    file "Work") that names it. New key, From a file, `~/.ssh/early_key`, Move. Reason: "The file stays: early are in a space that
-    hasn't finished its first sync." If the first sync finishes before you get there, skip the item and say so. Turn the network back
-    on afterwards.
+17. **A host in a space that hasn't finished its first sync.** Needs a throwaway space that this computer has off, not a space you
+    use. On the other computer create one named "Test first sync" (Settings → Sync → Spaces → New space…) and wait until this
+    computer lists it too ("Not on this computer"): this computer has to know the space before the network goes off. Turn the
+    network off, then turn the switch of "Test first sync" on: its row has not finished syncing (it reads "Syncing for the first
+    time…", or shows a relay error while you are offline). Make `ssh-keygen -t ed25519 -f ~/.ssh/early_key` and add a host `early` to
+    that space's file (New host, Target file "Test first sync") that names it. New key, From a file, `~/.ssh/early_key`, Move.
+    Reason: "The file stays: early are in a space that hasn't finished its first sync." If the first sync finishes before you get
+    there, skip the item and say so. Afterwards remove `early`, turn the network back on, and turn the space's switch off again
+    (confirm "Remove from this computer"); the clean-up at the end deletes the test spaces.
 18. **An IdentityFile outside a Host block.** Make two keys, `top_key` and `match_key`, and do each in its own run.
-    - Put `IdentityFile ~/.ssh/top_key` at the very top of `~/.ssh/config`, above any Host line. Move `top_key`.
+    - Put `IdentityFile ~/.ssh/top_key` at the very top of `~/.ssh/config`, above any Host line. Move `top_key`, then remove the line
+      again.
     - Put this in `~/.ssh/config`:
       ```
       Match host <test server>
         IdentityFile ~/.ssh/match_key
       ```
-      Move `match_key`.
+      Move `match_key`, then remove the block again.
 
     Both: the form lists no host, and the reason is "The file stays: an IdentityFile outside a Host block names it, and SSHelter only
-    switches hosts."
-19. **An IdentityFile SSHelter can't resolve.** Make a key whose file is named after a host: `ssh-keygen -t ed25519 -f ~/.ssh/github.com`.
-    Put this in `~/.ssh/config`:
+    switches hosts." The line and the Match block are not host blocks, so nothing else reminds you to remove them.
+19. **An IdentityFile SSHelter can't resolve.** Make a key whose file name looks like a host name, one that can't be one of your
+    own: `ssh-keygen -t ed25519 -f ~/.ssh/sshelter-test.example.com`. Put this in `~/.ssh/config`:
     ```
     Host *
       IdentityFile ~/.ssh/%h
     ```
-    Move `~/.ssh/github.com`. The form lists no host. Reason: "The file stays: an IdentityFile SSHelter can't resolve (a token, a
-    variable or a relative path) may name it." `~/.ssh/github.com` is still there and the `Host *` line still reads `IdentityFile ~/.ssh/%h`
-    (ssh would still find the file for `github.com`). Remove the block.
+    Move `~/.ssh/sshelter-test.example.com`. The form lists no host. Reason: "The file stays: an IdentityFile SSHelter can't resolve (a
+    token, a variable or a relative path) may name it." `~/.ssh/sshelter-test.example.com` is still there and the `Host *` line still
+    reads `IdentityFile ~/.ssh/%h` (ssh would still find the file for a host called `sshelter-test.example.com`). Remove the block.
 20. **A key file that is a symbolic link.** Mac: `ssh-keygen -t ed25519 -f ~/.ssh/real_key && ln -s ~/.ssh/real_key ~/.ssh/link_key`.
     Move `~/.ssh/link_key`. Reason: "The file stays: it's a link to another file, so SSHelter didn't remove either." Both `link_key`
     and `real_key` are still there. (Windows only if Developer Mode or an elevated PowerShell lets you make a link.)
@@ -210,14 +224,15 @@ couldn't check which hosts use it (no config loaded)." and "The file stays: your
       `~/.ssh/sshelter/keys/`.
     - On "RSA 4096" the button reads "Generating…" and every control in the form is off, and the window keeps responding: type into
       the sidebar's "Search keys…" box and move and resize the window while it works. It finishes within seconds.
-    - Export private key… (then "Export…") for the two RSA keys: `ssh-keygen -l -f <file>` prints 3072 and 4096 (RSA).
+    - Export private key… (then "Export…") for the two RSA keys, saving as `~/sshelter-test/gen_rsa3072_export` and
+      `~/sshelter-test/gen_rsa4096_export`: `ssh-keygen -l -f <file>` prints 3072 and 4096 (RSA).
     - "Generate a key file…" is gone: it isn't beside "Other key files in ~/.ssh" and nothing in the Keychain opens it.
 22. **A passphrase, and the name as the comment.** Generate key, Ed25519, Name `gen_pass`, type a passphrase and a different repeat:
     "Generate" stays off until both match. Generate it. "Passphrase" is "Yes". Export private key…: "Export gen_pass?" says "It stays
     protected by its passphrase."; "Export…" and save as `~/sshelter-test/gen_pass_export`. Then run
     `ssh-keygen -y -f ~/sshelter-test/gen_pass_export`: it asks for the passphrase and prints `ssh-ed25519 AAAA… gen_pass`, so the
-    key's name is its comment. Export `gen_ed` (item 21) without adding a passphrase and run `ssh-keygen -y -f` on that file: it
-    prints `ssh-ed25519 AAAA… gen_ed` without asking.
+    key's name is its comment. Export `gen_ed` (item 21) without adding a passphrase, saving as `~/sshelter-test/gen_ed_export`, and run
+    `ssh-keygen -y -f` on that file: it prints `ssh-ed25519 AAAA… gen_ed` without asking.
 23. **A New key form started during a slow generate.** Generate key, "RSA 4096", Name `gen_slow`, press "Generate". At once press "New
     key" and paste some text into the "Private key" box without adding it. When the generate finishes, the toast "Generated gen_slow"
     shows and `gen_slow` is in the list, but the New key form still holds your text: the pane does not jump to the new key. (If it
@@ -231,18 +246,18 @@ couldn't check which hosts use it (no config loaded)." and "The file stays: your
       "User" (placeholder `git`) and "File".
     - "Add host" stays off until Host has an alias and a File is chosen. "File" shows "Select a config file" (unless the sidebar is
       scoped to a file) and lists every config file SSHelter loaded: the main config, files it includes and your synced spaces by
-      name. `a b` in Host shows "A host alias can't contain spaces."; an alias that exists already (any host in your config, say `testbox`)
-      shows "testbox already exists."; only spaces shows "Enter a host alias."
-    - Host `github.com`, User `git`, File = the main config, "Add host": the toast says "Added github.com", the dialog closes, and
-      `github.com` is under the key's "Hosts" (pressing it opens Hosts with `github.com` selected). `~/.ssh/config` has `Host github.com`
-      with `User git` and `IdentityFile ~/.ssh/sshelter/keys/gen_ed-<8 hex>`, and `~/.ssh/sshelter/agent/config` lists
-      `Host github.com` at once.
-    - Press "Copy public key" and add it to GitHub as a throwaway key (a deploy key on a scratch repository, or a throwaway account).
-      `ssh -T git@github.com` shows the approval window and, after Allow, authenticates.
+      name. `a b` in Host shows "A host alias can't contain spaces."; an alias that exists already (any host in your config, say
+      `testbox`) shows "testbox already exists."; only spaces shows "Enter a host alias."
+    - Host `github-test` (not `github.com`: that could be a host you really use), HostName `github.com`, User `git`, File = the main
+      config, "Add host": the toast says "Added github-test", the dialog closes, and `github-test` is under the key's "Hosts" (pressing
+      it opens Hosts with `github-test` selected). `~/.ssh/config` has `Host github-test` with `HostName github.com`, `User git` and
+      `IdentityFile ~/.ssh/sshelter/keys/gen_ed-<8 hex>`, and `~/.ssh/sshelter/agent/config` lists `Host github-test` at once.
+    - Press "Copy public key" and add it to GitHub as a throwaway key (a deploy key on a scratch repository, or a throwaway account;
+      remove it afterwards). `ssh -T github-test` shows the approval window and, after Allow, authenticates.
 25. **A key with a passphrase logs in through the approval window.** Select `pass_key` (item 4), "Add a host for this key…": Host
     `passhost`, HostName = your test server, User = your user, File = the main config, "Add host". Put `pass_key.pub` on the test
     server. `ssh passhost`: the approval window has a "Passphrase" field. A wrong passphrase shows "That passphrase didn't work." and
-    asks again; the right one logs in.
+    asks again; the right one logs in. Items 28 to 30 reuse `passhost`.
 26. **A key file whose path has a space.** `ssh-keygen -t ed25519 -f "$HOME/.ssh/id test"` (Windows: `"$HOME\.ssh\id test"`), no
     passphrase, `.pub` on the test server. Open "Other key files in ~/.ssh", select `id test`, "Add a host for this key…": the dialog
     says "The new host uses this key: IdentityFile ~/.ssh/id test". Host `spacehost`, HostName = your test server, User = your user,
@@ -260,25 +275,26 @@ couldn't check which hosts use it (no config loaded)." and "The file stays: your
 
 ## The host editor
 
-28. **Three ways to pick a key.** In Hosts select a host that is in `~/.ssh/config` (not in a synced space). Its IdentityFile row has
-    the field, a key button (tooltip "Pick a key") and a folder button (tooltip "Browse…").
+28. **Three ways to pick a key.** In Hosts select `passhost` (item 25): a throwaway host in `~/.ssh/config`, not in a synced space.
+    The steps below change and save its IdentityFile, so don't use one of your real hosts. Its IdentityFile row has the field, a key
+    button (tooltip "Pick a key") and a folder button (tooltip "Browse…").
     - The key button's menu lists "Keys in SSHelter" (this computer's keys by name, `paste_test` among them) above "Keys in ~/.ssh"
       (the key files, `import_key` among them). Pick `paste_test` under "Keys in SSHelter": the field becomes
       `~/.ssh/sshelter/keys/paste_test-<8 hex>`, the row's note reads "paste_test is in SSHelter: ssh can use it only while SSHelter is
-      running.", and "Unsaved changes" shows. Save: `~/.ssh/sshelter/agent/config` lists the host at once and `ssh <host>` shows the
+      running.", and "Unsaved changes" shows. Save: `~/.ssh/sshelter/agent/config` lists the host at once and `ssh passhost` shows the
       approval window.
     - Pick `import_key` under "Keys in ~/.ssh": the field becomes `~/.ssh/import_key` and the note goes.
     - The folder button opens the system dialog "Choose an identity file". Pick `~/sshelter-test/file_key`: the field holds its full
       path, as picked (it is outside `~/.ssh`).
 29. **A picked path with a space is written quoted.** Make a folder with a space and a key in it:
-    `mkdir "$HOME/sshelter-test/my keys" && ssh-keygen -t ed25519 -f "$HOME/sshelter-test/my keys/id_space"`. In the host editor press the
+    `mkdir "$HOME/sshelter-test/my keys" && ssh-keygen -t ed25519 -f "$HOME/sshelter-test/my keys/id_space"`. On `passhost` press the
     folder button and pick `id_space`: the field shows the path in double quotes (`"/Users/<you>/sshelter-test/my keys/id_space"`).
-    Save, then `ssh -G <host>` prints an `identityfile` line and no error. Then pick `id test` (item 26) under "Keys in ~/.ssh": the
+    Save, then `ssh -G passhost` prints an `identityfile` line and no error. Then pick `id test` (item 26) under "Keys in ~/.ssh": the
     field is `"~/.ssh/id test"`.
-30. **The note in a narrow window.** On a host whose IdentityFile names a key in SSHelter (item 28), make the editor as narrow as it
-    gets: the window at its minimum width and the sidebar dragged to its widest. The note wraps onto several lines under the
-    "IdentityFile" label; the field and its two buttons stay visible on the right; nothing is cut off and the editor does not scroll
-    sideways. Raise Settings → Appearance → Text size and look again.
+30. **The note in a narrow window.** On `passhost` pick `paste_test` under "Keys in SSHelter" again (no need to Save; use Discard
+    afterwards), then make the editor as narrow as it gets: the window at its minimum width and the sidebar dragged to its widest. The
+    note wraps onto several lines under the "IdentityFile" label; the field and its two buttons stay visible on the right; nothing is
+    cut off and the editor does not scroll sideways. Raise Settings → Appearance → Text size and look again.
 
 ## Keys used by synced hosts, on two computers
 
@@ -299,17 +315,17 @@ synced.
     lint's message for `hostkeep` now ends "(a synced key slot — pick a key for it in Keychain)". No key reached B: it has no `.pub`
     and no private key file for `kkeep` in `~/.ssh/sshelter/keys/`.
 33. **"Sync key".** On A make `ksync` local-only and use it from Personal: New key, From a file, `~/.ssh/ksync`, "Keep the file too"
-    (add it), then "Add a host for this key…": Host `hostsync`, File = "Personal", "Add host". In "Keys used by synced hosts" press "Sync
-    key" (toast "ksync syncs to your other computers"). After B syncs, B's Keychain lists `ksync` with "Synced" and "Ready", "In
-    SSHelter — programs ask before they use it", and `~/.ssh/sshelter/keys/` on B has `ksync-<8 hex>.pub` and no private key file.
-    `ssh hostsync` on B shows the approval window and logs in. After A syncs again, A's `ksync` lists B's name under "Other computers"
-    with "in SSHelter".
+    (add it), then "Add a host for this key…": Host `hostsync`, HostName = the test server, User = the test user, File = "Personal",
+    "Add host". In "Keys used by synced hosts" press "Sync key" (toast "ksync syncs to your other computers"). After B syncs, B's
+    Keychain lists `ksync` with "Synced" and "Ready", "In SSHelter — programs ask before they use it", and `~/.ssh/sshelter/keys/` on
+    B has `ksync-<8 hex>.pub` and no private key file. `ssh hostsync` on B shows the approval window and logs in. After A syncs again,
+    A's `ksync` lists B's name under "Other computers" with "in SSHelter".
 34. **A reused account key lands in the vault.** Needs the same key on A as a "This computer only" key and in the account as a synced
     key that A's spaces don't use yet. On A: make `ssh-keygen -t ed25519 -f ~/sshelter-test/twin_key` and add it with New key, Paste, as
-    `twin`. On B: copy `twin_key` and `twin_key.pub` into B's `~/.ssh`, create a space "Reuse" (Settings → Sync → Spaces → New space…;
-    leave it off on A), add a host `twinhost` to it (New host, Target file "Reuse") that names `~/.ssh/twin_key`, Save, and in "Keys
-    used by synced hosts" press "Sync key". After A syncs, on A select `twin`, "Add a host for this key…": Host `reuse-host`, File =
-    "Personal", "Add host". No dialog asks (the account already has this key).
+    `twin`. On B: copy `twin_key` and `twin_key.pub` into B's `~/.ssh`, create a throwaway space "Test reuse" (Settings → Sync →
+    Spaces → New space…; leave it off on A), add a host `twinhost` to it (New host, Target file "Test reuse") that names
+    `~/.ssh/twin_key`, Save, and in "Keys used by synced hosts" press "Sync key". After A syncs, on A select `twin`, "Add a host for
+    this key…": Host `reuse-host`, File = "Personal", "Add host". No dialog asks (the account already has this key).
     - `reuse-host` now names the account's slot (`IdentityFile ~/.ssh/sshelter/keys/twin_key-<8 hex>`, not a `twin-…` one).
     - The Keychain lists `twin_key` as "Synced" with "In SSHelter — programs ask before they use it", and `twin` still as "This
       computer only".
@@ -334,8 +350,8 @@ synced.
       computer. It's the only copy unless you exported one." with "Cancel" and "Delete". "Cancel" changes nothing.
     - "Delete": the toast says "Deleted del_key", the row leaves the list, and the main pane says "No key selected" and "Choose a key
       from the list." The `.pub` is gone from `~/.ssh/sshelter/keys/`, and the `grep` above prints 0 (Windows: finds nothing).
-37. **Not offered while a host uses the key.** Select `gen_ed` (item 24): "Hosts" lists `github.com` and there is no "Delete key…"
-    button. Change `github.com`'s IdentityFile in the host editor, or remove the host, and come back: "Delete key…" is there.
+37. **Not offered while a host uses the key.** Select `gen_ed` (item 24): "Hosts" lists `github-test` and there is no "Delete key…"
+    button. Change `github-test`'s IdentityFile in the host editor, or remove the host, and come back: "Delete key…" is there.
 
 ## Layout
 
@@ -353,27 +369,46 @@ synced.
     `id_pem` row has no "File for now" badge and the banner's count does not include it. Its detail's "On this computer" reads "It
     stays a file: This key isn't in the OpenSSH format. Convert it with ssh-keygen -p -f <file>, then try again." and there is no "Move
     into SSHelter" button. With a FIDO security key (`ssh-keygen -t ed25519-sk`) it reads "It stays a file: SSHelter's agent can't use
-    this kind of key (for example a security key or a DSA key), so it stays as a file." Afterwards remove `pemhost` and use "Delete
-    copy" on the `id_pem` row.
+    this kind of key (for example a security key or a DSA key), so it stays as a file." Afterwards remove `pemhost`; the `id_pem` row then
+    reads "Not used on this computer".
 
 ## Keys only on this computer, with and without an account
 
-40. **A key lost from the vault stays listed.** Make a key `lost_key` (Generate key, Ed25519) and use it from a host: "Add a host for
-    this key…" `losthost`, File = the main config. Export it first (Export private key…, `~/sshelter-test/lost_key_export`). Quit
-    SSHelter, rename `vault.json` in the data folder (item 36) to `vault.json.aside`, start SSHelter, and wait for a sync attempt
-    (switch to another app and back). `lost_key` is still in the list with the badges "This computer only" and "Error", and its
-    detail's "On this computer" reads "This key is no longer in SSHelter's vault. If you exported a copy, add it again with New key."
-    (every key that is only on this computer shows the same while the vault is set aside; synced keys come back from the account).
-    "Hosts" lists `losthost`, so there is no "Delete key…". Change `losthost`'s IdentityFile in the host editor: "Delete key…"
-    appears; press it and "Delete": the toast says "Deleted lost_key" and the row is gone. New key, From a file, `lost_key_export`
-    ("Keep the file too") adds it again. To get the other keys back, quit SSHelter, delete the new `vault.json` (if there is one), and
-    rename `vault.json.aside` back.
-41. **Without a sync account.** Do this last: it leaves the sync account. Settings → Sync → Leave…, then Leave. The Keychain still
-    lists the keys that are "This computer only" and their detail still works.
+40. **A key lost from the vault stays listed.** Read this first: the steps set your whole vault aside, so every key in it counts as
+    lost until the file is back. A key that is only on this computer keeps its record, and its error goes by itself once `vault.json`
+    is back. A synced key that a host uses is restored from the account (it doesn't need the file). Two kinds of key do not come back.
+    An own-key slot that a host uses ("Own key on each computer": `kkeep` while `hostkeep` exists, or a real key such as the 2a `db`
+    key) can't be restored from the account, so it reads "This key was lost from SSHelter's vault. Pick it again on this computer.",
+    and putting `vault.json` back does not link it again: you pick the key again with "Pick a key on this computer…" (its key file or
+    an export). And while you are in an account, a key left over from a previous account is forgotten. Run this item only if such keys
+    on this computer are throwaways. Or copy `sync-state.json` together with `vault.json` first (same data folder, item 36) and, to
+    undo it, put both copies back with SSHelter quit (not tried: it also rewinds the sync state).
+    - Make a key `lost_key` (Generate key, Ed25519) and use it from a host: "Add a host for this key…" `losthost`, File = the main
+      config. Export it first (Export private key…, `~/sshelter-test/lost_key_export`).
+    - Quit SSHelter (Quit in the menu bar or tray icon's menu; closing the window keeps it running when Keep running in menu bar is
+      on), rename `vault.json` in the data folder to `vault.json.aside`, start SSHelter, and wait for a sync attempt (switch to another
+      app and back).
+    - `lost_key` is still in the list with the badges "This computer only" and "Error", and its detail's "On this computer" reads "This
+      key is no longer in SSHelter's vault. If you exported a copy, add it again with New key." Every key that is only on this computer
+      shows the same.
+    - Try what the row says: New key, From a file, `~/sshelter-test/lost_key_export`. Today the form says "This key is already in
+      SSHelter as lost_key." and "Add to SSHelter" is off (pasting the key gives the same sentence in the "Could not add the key"
+      toast). Record it: the row promises more than the app does. A lost key that a host uses can't be added again until the host stops
+      using it: "Hosts" lists `losthost`, so "Delete key…" isn't offered either.
+    - Change `losthost`'s IdentityFile in the host editor and come back to `lost_key`: "Delete key…" appears. Press it and "Delete":
+      the toast says "Deleted lost_key" and the row is gone. Now New key, From a file, `lost_key_export` ("Keep the file too") adds it.
+    - Put the vault back: quit SSHelter the same way, delete the new `vault.json` (if there is one), rename `vault.json.aside` back,
+      start SSHelter and wait for a sync attempt. The keys that are only on this computer are "Ready" again. The `lost_key` you just
+      added shows the lost error again (its entry was in the new file): Delete key… it.
+41. **Without a sync account.** This item and item 42 come last: they leave your sync account, and item 42 creates a new one. Before
+    you start, show the original sync code on B (Settings → Sync → Sync code → Show) and write the 24 words down: getting back needs
+    them. On A: Settings → Sync → Leave…, then Leave (if the dialog offers "Also delete the sync account and every space from the
+    relay", leave it unticked). A's space files become local files in `~/.ssh/sshelter-local/`. The Keychain still lists the keys
+    that are "This computer only" and their detail still works.
     - Delete a key's `.pub` in Finder or Explorer (`~/.ssh/sshelter/keys/<name>-<8 hex>.pub`). Switch to another app and back to
       SSHelter, or wait up to 5 minutes: the `.pub` is back.
-    - Repeat item 40 with a new key now that there is no account: the key stays listed with the same error, and Delete key… removes
-      it once no host uses it. Put the vault back as item 40 says afterwards: item 42 needs `ksync`.
+    - Repeat item 40 with a new key, and its warning, now that there is no account: the key stays listed with the same error, and
+      Delete key… removes it once no host uses it. Put the vault back as item 40 says afterwards: item 42 needs `ksync`.
 
 ## A key from a previous sync account
 
@@ -385,6 +420,12 @@ synced.
     key": the toast says "ksync syncs to your other computers", `prevhost` still names `~/.ssh/sshelter/keys/ksync-<8 hex>` (it is not
     rewritten), and `ksync` is "Synced" in the new account.
 
+    To get back to your original account: remove `prevhost`, Settings → Sync → Leave… and Leave (the new account is a throwaway, so
+    "Also delete the sync account and every space from the relay" may be ticked here), then Settings → Sync → "Join with a sync code":
+    paste the 24 words you wrote down, Join, and turn Personal on in "Choose spaces for this computer". The hosts that became local
+    files in `~/.ssh/sshelter-local/` then exist twice next to the account's: remove one copy of each name (item 7 of
+    `2026-10-02-sync-v2-manual-verification.md` shows how).
+
 ## Windows
 
 43. **Windows.** Run items 3, 6, 8, 9, 11, 21 and 24 on the Windows computer too (PowerShell for the commands; "Terminal" there is
@@ -393,12 +434,34 @@ synced.
       "Removed C:\Users\<you>\.ssh\move_key."; the default-file sentence in item 11 still says `~/.ssh/id_ed25519`. The host lines use
       `~/.ssh/sshelter/keys/<name>-<8 hex>` as on the Mac. The long path in item 9 (with backslashes) wraps too.
     - `~/.ssh/sshelter/agent/config` names the pipe: `IdentityAgent //./pipe/sshelter-agent-<hex>`. In item 8 `ssh movehost` and in
-      item 24 `ssh -T git@github.com`, run from PowerShell, show the approval window and log in.
+      item 24 `ssh -T github-test`, run from PowerShell, show the approval window and log in.
     - A Browse pick (the folder button in the host editor) of a key outside `~/.ssh` whose path has a space is written in double
       quotes: `mkdir "$HOME\My Keys"` and `ssh-keygen -t ed25519 -f "$HOME\My Keys\id_test"`, pick it: the field holds
       `"C:\Users\<you>\My Keys\id_test"`; Save, and `ssh -G <host>` prints an `identityfile` line and no error.
     - Item 20 (the symbolic link) only if Developer Mode or an elevated PowerShell lets you make one.
 
-When you are done: remove the host blocks you added by hand, restore `~/.ssh/config` from `~/.ssh/config.before-2b1` if it is simpler
-(press Fix in the Keychain if the `Include ~/.ssh/sshelter/agent/config` line is missing afterwards), Delete key… the test keys, and
-delete `~/sshelter-test` and the `~/.ssh/*_key` files you made.
+## Clean up
+
+Everything above is test material. Look before you delete: a name may match one of your real files or hosts. Repeat the key and file
+parts on the other computer (and on Windows) for what it has.
+
+- Config: remove what is left of the hand-made host blocks, IdentityFile lines and Match blocks, or restore `~/.ssh/config` from
+  `~/.ssh/config.before-2b1` (press Fix in the Keychain if the `Include ~/.ssh/sshelter/agent/config` line is missing afterwards).
+  Remove the hosts the items made in the app: `github-test`, `passhost`, `spacehost`, `askhost`, `askhost2`, `lockhost`, `losthost`,
+  `hostkeep`, `hostsync`, `reuse-host`, `prevhost`, `linkedhost`, `pemhost` (the ones in Personal go from B as well after a sync).
+- Keys in SSHelter: "Delete key…" on every key you added with New key or Generate key (they say "This computer only"; the names are in
+  the items). A key that went into the account (`kkeep`, `ksync`, `twin_key`) has "Delete copy" once no host uses it, on each computer
+  that has it. A slot that links to a key file (`linked_key`, `id_pem`) reads "Not used on this computer" and needs nothing (without
+  an account it reads "Not in use" and has "Delete copy"). This version can't remove a key slot from the account, so those rows stay
+  listed as unused.
+- Test spaces: "Test first sync" (item 17) and "Test reuse" (item 34). Turn the space's switch off if it is on (confirm "Remove from
+  this computer"), then its Actions menu, "Delete…" and "Delete space" (it goes from every computer and the relay).
+- Files: delete `~/sshelter-test` (Windows: `Remove-Item -Recurse $HOME\sshelter-test`): it holds the scratch keys and every export.
+  In `~/.ssh/` delete, each with its `.pub`: `keep_key`, `import_key`, `linked_key`, `dup_key`, `early_key`, `top_key`, `match_key`,
+  `real_key`, `link_key` (the link), `id test`, `ksync`, `id_pem` and `sshelter-test.example.com`. Also the `.pub` files that stay
+  after a Move: `move_key.pub`, `star_key.pub`, `drift_key.pub` and `kkeep.pub` (and `move_key` itself if you cancelled the Move in
+  item 9). `id_ecdsa` and its `.pub` only if you made them for item 11. On B: `twin_key` and `twin_key.pub`. Windows: `$HOME\My Keys`.
+  In the data folder (item 36), once the vault is back: `vault.json.aside` and the copies of `sync-state.json` and `vault.json` you
+  made for item 40.
+- Test server and GitHub: put `~/.ssh/authorized_keys.before-2b1` back as `~/.ssh/authorized_keys`, and remove the key you added to
+  GitHub in item 24.
