@@ -27,10 +27,15 @@ account. A step marked Mac or Windows is for that computer only. The Windows pas
    lines, Match blocks) when its item is done. A host you add in Personal also reaches B and would clutter its checks, so remove it
    when its item is done too, unless a later item names it. "Clean up" at the end lists everything the items create.
 
-   Look at your real config before you start: `grep -n IdentityFile ~/.ssh/config`, and the same in the files it includes. An
-   IdentityFile value with a `%` token (`%h`), a `${VAR}` or a relative path is one SSHelter can't resolve, and it can make a Move keep
-   its file (the reason in item 19) for keys you didn't expect. Comment such lines out while you test (Reload from disk) and put them
-   back afterwards.
+   Items 14, 31 to 35 and 39 put test keys into your real sync account as key slots (`linked_key`, `kkeep`, `ksync`, `twin_key`,
+   `lock_key`, `id_pem`). This version can't remove a key slot from an account, so those records stay in it for good: after the
+   clean-up they are listed as unused.
+
+   Look at your real config before you start: `grep -n IdentityFile ~/.ssh/config` (Windows:
+   `Select-String -Pattern IdentityFile -Path $HOME\.ssh\config`, which prints each line with its number), and the same in the files
+   it includes. An IdentityFile value with a `%` token (`%h`), a `${VAR}` or a relative path is one SSHelter can't resolve, and it can
+   make a Move keep its file (the reason in item 19) for keys you didn't expect. Comment such lines out while you test (Reload from
+   disk) and put them back afterwards.
 2. Update both computers to this build. Nothing changes by itself: the Keychain lists the keys it had with the same badges, and `ssh`
    to the hosts that use them works as before. Open the Keychain with the toolbar's key button or the `Hosts | Keychain` switch at the
    top of the sidebar: "In SSHelter" has two buttons beside its title, "New key" and "Generate key".
@@ -108,8 +113,8 @@ account. A step marked Mac or Windows is for that computer only. The Windows pas
    - A long path wraps. Make a throwaway key in nested folders so that its full path is over 100 characters (for example
      `~/sshelter-test/a-folder-with-a-long-name/another-folder-with-a-long-name/yet-another-long-folder/long_key`): the confirm's text
      wraps inside the dialog and nothing is cut off or runs past its edge. Then try a key whose file name is 70 characters long without
-     hyphens or spaces: the confirm is expected to overflow until it gets `break-all`; record that as a known fail and don't fail the
-     item for it.
+     hyphens or spaces (Mac: `ssh-keygen -t ed25519 -N '' -f ~/sshelter-test/$(printf 'k%.0s' {1..70})`): the name in the title and
+     in the path breaks inside itself and wraps too, and nothing is cut off.
 10. **Move and a `Host *` block.** Make `ssh-keygen -t ed25519 -f ~/.ssh/star_key` and add this to the end of `~/.ssh/config` (it makes
     every host use the key, so remove it afterwards), then Reload from disk:
     ```
@@ -374,41 +379,45 @@ synced.
 
 ## Keys only on this computer, with and without an account
 
-40. **A key lost from the vault stays listed.** Read this first: the steps set your whole vault aside, so every key in it counts as
-    lost until the file is back. A key that is only on this computer keeps its record, and its error goes by itself once `vault.json`
-    is back. A synced key that a host uses is restored from the account (it doesn't need the file). Two kinds of key do not come back.
-    An own-key slot that a host uses ("Own key on each computer": `kkeep` while `hostkeep` exists, or a real key such as the 2a `db`
-    key) can't be restored from the account, so it reads "This key was lost from SSHelter's vault. Pick it again on this computer.",
-    and putting `vault.json` back does not link it again: you pick the key again with "Pick a key on this computer…" (its key file or
-    an export). And while you are in an account, a key left over from a previous account is forgotten. Run this item only if such keys
-    on this computer are throwaways. Or copy `sync-state.json` together with `vault.json` first (same data folder, item 36) and, to
-    undo it, put both copies back with SSHelter quit (not tried: it also rewinds the sync state).
-    - Make a key `lost_key` (Generate key, Ed25519) and use it from a host: "Add a host for this key…" `losthost`, File = the main
-      config. Export it first (Export private key…, `~/sshelter-test/lost_key_export`).
+40. **A key lost from the vault stays listed, and its export brings it back.** Read this first: the steps set your whole vault aside,
+    so every key in it counts as lost until the file is back. A key that is only on this computer keeps its record, and its error goes
+    by itself once `vault.json` is back. A synced key that a host uses is restored from the account (it doesn't need the file). Two
+    kinds of key do not come back. An own-key slot that a host uses ("Own key on each computer": `kkeep` while `hostkeep` exists, or a
+    real key such as the 2a `db` key) can't be restored from the account: for one round it reads "This key was lost from SSHelter's
+    vault. Pick it again on this computer.", then "Needs a key on this computer", and putting `vault.json` back does not link it again:
+    you pick the key again with "Pick a key on this computer…" (its key file or an export). And while you are in an account, a key left
+    over from a previous account is forgotten. Run this item only if such keys on this computer are throwaways. Or copy
+    `sync-state.json` together with `vault.json` first (same data folder, item 36) and, to undo it, put both copies back with SSHelter
+    quit (not tried: it also rewinds the sync state).
+    - Make a key `lost_key` (Generate key, Ed25519), put its public key on the test server ("Copy public key"), and use it from a host:
+      "Add a host for this key…" `losthost`, HostName = your test server, User = your user, File = the main config. `ssh losthost`
+      shows the approval window and logs in after Allow. Export the key (Export private key…, `~/sshelter-test/lost_key_export`).
     - Quit SSHelter (Quit in the menu bar or tray icon's menu; closing the window keeps it running when Keep running in menu bar is
       on), rename `vault.json` in the data folder to `vault.json.aside`, start SSHelter, and wait for a sync attempt (switch to another
       app and back).
     - `lost_key` is still in the list with the badges "This computer only" and "Error", and its detail's "On this computer" reads "This
       key is no longer in SSHelter's vault. If you exported a copy, add it again with New key." Every key that is only on this computer
       shows the same.
-    - Try what the row says: New key, From a file, `~/sshelter-test/lost_key_export`. Today the form says "This key is already in
-      SSHelter as lost_key." and "Add to SSHelter" is off (pasting the key gives the same sentence in the "Could not add the key"
-      toast). Record it: the row promises more than the app does. A lost key that a host uses can't be added again until the host stops
-      using it: "Hosts" lists `losthost`, so "Delete key…" isn't offered either.
-    - Change `losthost`'s IdentityFile in the host editor and come back to `lost_key`: "Delete key…" appears. Press it and "Delete":
-      the toast says "Deleted lost_key" and the row is gone. Now New key, From a file, `lost_key_export` ("Keep the file too") adds it.
-    - Put the vault back: quit SSHelter the same way, delete the new `vault.json` (if there is one), rename `vault.json.aside` back,
-      start SSHelter and wait for a sync attempt. The keys that are only on this computer are "Ready" again. The `lost_key` you just
-      added shows the lost error again (its entry was in the new file): Delete key… it.
+    - Do what the row says: New key, From a file, `~/sshelter-test/lost_key_export`. The form shows no problem, and its Name is
+      `lost_key`, the row's name. Type another Name (`renamed`), press "Keep the file too" (the export is your backup) and "Add to
+      SSHelter". The toast says "lost_key is in SSHelter" and the same row is selected: there is no second row and no `renamed`. Its
+      error is gone ("Ready", "In SSHelter — programs ask before they use it"), "Hosts" still lists `losthost`, and `losthost` still
+      names `~/.ssh/sshelter/keys/lost_key-<8 hex>`, unchanged. `ssh losthost` shows the approval window again and logs in after Allow.
+    - Pasting works the same. Put the key of `paste_test` (item 3) on the clipboard (Mac: `pbcopy < ~/sshelter-test/paste_key`;
+      Windows: `Get-Content -Raw $HOME\sshelter-test\paste_key | Set-Clipboard`), New key, Paste, any Name, "Add to SSHelter": the
+      toast says "paste_test is in SSHelter" and the `paste_test` row is "Ready" again, still one row.
+    - Put the vault back: quit SSHelter the same way, delete the new `vault.json`, rename `vault.json.aside` back, start SSHelter and
+      wait for a sync attempt. The keys that are only on this computer are "Ready", `lost_key` and `paste_test` among them.
 41. **Without a sync account.** This item and item 42 come last: they leave your sync account, and item 42 creates a new one. Before
     you start, show the original sync code on B (Settings → Sync → Sync code → Show) and write the 24 words down: getting back needs
-    them. On A: Settings → Sync → Leave…, then Leave (if the dialog offers "Also delete the sync account and every space from the
-    relay", leave it unticked). A's space files become local files in `~/.ssh/sshelter-local/`. The Keychain still lists the keys
-    that are "This computer only" and their detail still works.
+    them (the end of item 42 says how). On A: Settings → Sync → Leave…, then Leave (if the dialog offers "Also delete the sync account
+    and every space from the relay", leave it unticked). A's space files become local files in `~/.ssh/sshelter-local/`. The Keychain
+    still lists the keys that are "This computer only" and their detail still works.
     - Delete a key's `.pub` in Finder or Explorer (`~/.ssh/sshelter/keys/<name>-<8 hex>.pub`). Switch to another app and back to
       SSHelter, or wait up to 5 minutes: the `.pub` is back.
-    - Repeat item 40 with a new key, and its warning, now that there is no account: the key stays listed with the same error, and
-      Delete key… removes it once no host uses it. Put the vault back as item 40 says afterwards: item 42 needs `ksync`.
+    - Repeat item 40 with a new key and host, now that there is no account (read its warning again first): the key stays listed with
+      the same error, and adding its export again brings the same row back, error gone. Put the vault back as item 40 says afterwards:
+      item 42 needs `ksync`.
 
 ## A key from a previous sync account
 
@@ -422,9 +431,12 @@ synced.
 
     To get back to your original account: remove `prevhost`, Settings → Sync → Leave… and Leave (the new account is a throwaway, so
     "Also delete the sync account and every space from the relay" may be ticked here), then Settings → Sync → "Join with a sync code":
-    paste the 24 words you wrote down, Join, and turn Personal on in "Choose spaces for this computer". The hosts that became local
-    files in `~/.ssh/sshelter-local/` then exist twice next to the account's: remove one copy of each name (item 7 of
-    `2026-10-02-sync-v2-manual-verification.md` shows how).
+    paste the 24 words you wrote down and press Join. "Choose spaces for this computer" opens with every space of the account ticked:
+    keep the ones A had on before item 41 (Personal, and any others of your own) and untick the rest, such as the test spaces of items
+    17 and 34, then press "Sync N spaces" (the button counts the ticked spaces: "Sync 1 space" for one). The hosts that became local
+    files in `~/.ssh/sshelter-local/` in item 41 then exist twice, next to the space's copies: remove the copy in
+    `~/.ssh/sshelter-local/`, never the space's (removing that one removes the host from your other computers too). Item 7 of
+    `2026-10-02-sync-v2-manual-verification.md` shows how to remove one copy.
 
 ## Windows
 
@@ -450,10 +462,10 @@ parts on the other computer (and on Windows) for what it has.
   Remove the hosts the items made in the app: `github-test`, `passhost`, `spacehost`, `askhost`, `askhost2`, `lockhost`, `losthost`,
   `hostkeep`, `hostsync`, `reuse-host`, `prevhost`, `linkedhost`, `pemhost` (the ones in Personal go from B as well after a sync).
 - Keys in SSHelter: "Delete key…" on every key you added with New key or Generate key (they say "This computer only"; the names are in
-  the items). A key that went into the account (`kkeep`, `ksync`, `twin_key`) has "Delete copy" once no host uses it, on each computer
-  that has it. A slot that links to a key file (`linked_key`, `id_pem`) reads "Not used on this computer" and needs nothing (without
-  an account it reads "Not in use" and has "Delete copy"). This version can't remove a key slot from the account, so those rows stay
-  listed as unused.
+  the items). A key that went into the account (`kkeep`, `ksync`, `twin_key`, `lock_key`) has "Delete copy" once no host uses it, on
+  each computer that has it. A slot that links to a key file (`linked_key`, `id_pem`) reads "Not used on this computer" and needs
+  nothing (without an account it reads "Not in use" and has "Delete copy"). This version can't remove a key slot from the account, so
+  those rows stay listed as unused.
 - Test spaces: "Test first sync" (item 17) and "Test reuse" (item 34). Turn the space's switch off if it is on (confirm "Remove from
   this computer"), then its Actions menu, "Delete…" and "Delete space" (it goes from every computer and the relay).
 - Files: delete `~/sshelter-test` (Windows: `Remove-Item -Recurse $HOME\sshelter-test`): it holds the scratch keys and every export.
