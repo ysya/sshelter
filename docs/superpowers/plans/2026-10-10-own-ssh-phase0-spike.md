@@ -252,7 +252,7 @@ for title, items in [("New crates", new_crates), ("A second version of a crate t
 ```bash
 cd /Users/ysya/project/sideproj/sshelter/spike/russh
 export PATH=$HOME/.rustup/toolchains/stable-aarch64-apple-darwin/bin:$PATH
-cargo tree --offline -i ssh-key | tee target/cargo-tree-ssh-key.txt
+cargo tree --offline -i ssh-key@0.6.7 | tee target/cargo-tree-ssh-key.txt && cargo tree --offline -i ssh-key@0.7.0-rc.11 | tee -a target/cargo-tree-ssh-key.txt
 cargo tree --offline -i aws-lc-rs | tee target/cargo-tree-aws-lc-rs.txt
 python3 -I "$SCRATCH/lock_delta.py" ../../src-tauri/Cargo.lock Cargo.lock | tee target/lock-delta.txt
 ```
@@ -3015,8 +3015,9 @@ Expected: only `test result: ok.` lines (one per test binary: the library, then 
 ```bash
 cd /Users/ysya/project/sideproj/sshelter/spike/russh
 export PATH=$HOME/.rustup/toolchains/stable-aarch64-apple-darwin/bin:$PATH
-cargo tree --offline -i ssh-key > target/cargo-tree-ssh-key.txt
-cargo tree --offline -i aws-lc-rs > target/cargo-tree-aws-lc-rs.txt
+# Keep Task 1's saved files; regenerate only if one is missing. `-i ssh-key` without a version exits 101 (two versions in the lock).
+[ -s target/cargo-tree-ssh-key.txt ] || { cargo tree --offline -i ssh-key@0.6.7 && cargo tree --offline -i ssh-key@0.7.0-rc.11; } > target/cargo-tree-ssh-key.txt
+[ -s target/cargo-tree-aws-lc-rs.txt ] || cargo tree --offline -i aws-lc-rs > target/cargo-tree-aws-lc-rs.txt
 python3 -I "$SCRATCH/lock_delta.py" ../../src-tauri/Cargo.lock Cargo.lock > target/lock-delta.txt
 grep '^FACT ' target/lock-delta.txt >> target/spike-run.log
 cd ../../src-tauri
@@ -3156,7 +3157,7 @@ Save as `$SCRATCH/report.tmpl.md` (the outer fence is four backticks because the
 | # | 問題 | 結果 | 證據 |
 |---|---|---|---|
 | 1 | app 的 `ssh-key` 0.6.7 與 russh 釘的 `ssh-key` 0.7.0-rc 能在同一個 build 並存嗎? | {{all:both_ssh_key_versions_parse_the_same_public_keys_and_agree_on_the_fingerprints,the_lock_file_holds_ssh_key_0_6_7_and_a_0_7_release_candidate,the_app_library_is_linked_into_the_same_binary}} | 附錄的 `cargo tree -i ssh-key`;`coexistence` 的三個測試 |
-| 2 | 把 russh 加進 app,`src-tauri/Cargo.lock` 會多什麼? | 新增 {{fact:lock.new_crates}} 個套件(其中預覽版 {{fact:lock.prerelease_crates}} 個);app 既有的套件被換版本:{{fact:lock.app_versions_replaced}} 個;已有的套件多出第二個版本:{{fact:lock.second_versions_of_crates_the_app_has}} 個 | 附錄的 lock delta;`aws-lc-rs` 只有一個版本(附錄) |
+| 2 | 把 russh 加進 app,`src-tauri/Cargo.lock` 會多什麼? | 新增 92 個套件(34 個新 crate 加 58 個既有 crate 的第二版本;預覽版 3 個:pkcs1 0.8.0-rc.4、rsa 0.10.0-rc.18、ssh-key 0.7.0-rc.11;`zeroize` 1.8.2 → 1.9.1 是唯一被換掉的版本。Task 1 實測;`lock_delta.py` 的原始 `new_crates`/`prerelease_crates` 是 35/5,含試驗套件本身與 wasi build-metadata 的誤判,不要直接引用);app 既有的套件被換版本:{{fact:lock.app_versions_replaced}} 個;已有的套件多出第二個版本:{{fact:lock.second_versions_of_crates_the_app_has}} 個 | 附錄的 lock delta;`aws-lc-rs` 只有一個版本(附錄) |
 | 3 | 保管庫的 `Material::sign` 能接成 russh 的 `Signer` 嗎(Ed25519、ECDSA P-256、RSA 3072)? | {{all:an_ed25519_key_in_the_vault_logs_in,an_ecdsa_p256_key_in_the_vault_logs_in,an_rsa_3072_key_in_the_vault_logs_in_with_a_sha2_signature}};RSA 在線上用的演算法:{{fact:signer.rsa.algorithm_on_the_wire}}(russh 給的 hash_alg:{{fact:signer.rsa.hash_alg_offered_by_russh}}) | `vault_signer`;簽章格式見計畫 Task 2 |
 | 4 | sshd 真的在驗保管庫簽的東西嗎(負向對照) | {{test:a_signature_from_another_key_is_refused}} | `vault_signer` |
 | 5 | 只講 `ssh-rsa`(SHA-1)的舊伺服器(Review Focus 1) | {{test:an_rsa_key_in_the_vault_logs_in_to_a_server_that_only_speaks_ssh_rsa_sha1}};russh 給的 hash_alg:{{fact:signer.sha1_only.hash_alg_offered_by_russh}};線上演算法:{{fact:signer.sha1_only.algorithm_on_the_wire}} | `vault_signer` |
