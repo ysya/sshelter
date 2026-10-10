@@ -291,6 +291,7 @@ Connect 按鈕、指令面板、托盤的快速連線:沿用 `connect.rs` 的 `d
 - 現有記錄模型:`Record{kind,id,version,updated_at_ms,device_id,deleted,payload}`;space 鏈的 `host` 記錄今天是整段 Host 文字(`HostPayload{schema,text}`);帳戶 `schema_version` 超過支援的值就唯讀。
 - Windows 的 release 版是 `windows_subsystem = "windows"`,沒有 console;`GetNamedPipeClientProcessId` 已在 `agent/pipe_windows.rs` 使用。
 - app data 目錄 `~/Library/Application Support/org.homelab.sshelter/` 下的 socket 路徑在這台是 69 bytes(上限 104)。
+- 臨時 sshd(2026-10-10 本機實測,macOS 內建 OpenSSH 10.3p1,一般使用者、不碰 `~/.ssh`):在臨時目錄放 `hostkey`(ssh-keygen ed25519)、`authorized_keys`(0600),設定 `Port <空閒埠>`、`ListenAddress 127.0.0.1`、`HostKey <絕對路徑>`、`PidFile none`、`UsePAM no`、`PasswordAuthentication no`、`KbdInteractiveAuthentication no`、`PubkeyAuthentication yes`、`AuthorizedKeysFile <絕對路徑>`、`StrictModes no`、`LogLevel ERROR`;`sshd -t -f` 通過,`sshd -D -e -f <設定>` 啟動約 1 秒後可用公鑰登入,遠端結束碼與輸出正確傳回;sshd 的 stderr 只有一行無害的 `BSM audit: … setaudit_addr failed: Operation not permitted`。`Port 0` 不被接受,埠要先用 socket 綁 0 取得。密碼與 keyboard-interactive 在沒有 PAM 的臨時 sshd 上無法驗證,要在真實主機上測。
 - Termius:更新紀錄顯示堆疊裡有 libssh2(2026-07 修補 CVE-2026-55200);桌面版是 Electron;SSH 核心是否自研不公開;用自己的內建 agent,未見提供給其他程式;AI agent 每條指令要確認;未見 MCP。
 
 ## 16. 待試驗與未決
