@@ -254,7 +254,7 @@ Connect 按鈕、指令面板、托盤的快速連線:沿用 `connect.rs` 的 `d
 ## 12. 測試、CI、安全
 
 - 單元測試照舊(inline);引擎在介面後面,所以 broker、MCP、CLI 的測試用假引擎(`FakeEngine`:可編排主機金鑰結果、認證結果、輸出、斷線)。
-- 整合測試:真引擎對本機臨時 `sshd`(沿用 `agent/openssh_tests.rs` 起 sshd 的模式;測試不碰使用者的 `~/.ssh`),涵蓋公鑰(從保管庫簽章)、密碼、keyboard-interactive、PTY 與 window change、exec、兩層跳板、主機金鑰的三種結果、keepalive 斷線。macOS/Linux 的 CI 跑;Windows CI 新增一個工作:對 Windows OpenSSH server 連線加 exec,證明 Windows 跑得起來。
+- 整合測試:真引擎對本機臨時 `sshd`(repo 裡還沒有起 sshd 的測試架構,`agent/openssh_tests.rs` 只用 ssh-keygen 與 ssh-add;第 0 期要建一套:臨時目錄、隨機埠、測試用主機金鑰與 authorized_keys、以一般使用者執行 `sshd -D -f <設定>`,工具不在 PATH 上就略過;測試不碰使用者的 `~/.ssh`),涵蓋公鑰(從保管庫簽章)、密碼、keyboard-interactive、PTY 與 window change、exec、兩層跳板、主機金鑰的三種結果、keepalive 斷線。macOS/Linux 的 CI 跑;Windows CI 新增一個工作:對 Windows OpenSSH server 連線加 exec,證明 Windows 跑得起來。
 - 兩台電腦的同步測試在記錄層用 `FakeRelay`(不再需要檔案);搬遷測試用固定的 ssh_config 樣本。
 - CLI 測試:協定編解碼、raw mode 的進出與還原(假的 termios);Windows console 的部分列入手動清單。
 - 安全:`cargo audit` 進 CI;russh 的公告每月看一次;私鑰只在 app 行程;IPC 只接受同使用者;MCP `auto_log` 絕不接受主機金鑰、絕不代答提示。
@@ -286,6 +286,7 @@ Connect 按鈕、指令面板、托盤的快速連線:沿用 `connect.rs` 的 `d
 - russh-sftp 3.0.1(2026-09-28),SFTP v3,之後用。
 - `ssh2`(libssh2 綁定)0.9.6:C 相依、同步 API、文件無自訂簽章、libssh2 正式版停在 2024-10、2026 年有 client 端 CVE;不採用。
 - 保管庫的 `vault/material.rs` `Material::sign(data, flags)` 可對任意位元組簽章(Ed25519、ECDSA、RSA),可當 `AuthSource::sign` 的實作。
+- lib crate 名稱是 `sshelter_lib`(crate-type 含 rlib,可用路徑相依),但 `lib.rs` 的 `mod vault` 不是 `pub`:試驗要開放可見性或在試驗 crate 裡複製簽章那段。`tokio 1.52`、`aws-lc-rs 1.18`、`ring 0.17`、`rustls 0.23` 已在 app 的 Cargo.lock 裡,russh 的預設不會帶進新的加密堆疊;待驗證的只剩 `ssh-key` 兩個版本並存。
 - 同步引擎是阻塞式執行緒(`reqwest::blocking` 不能跑在 tokio 上),所以連線 runtime 要分開。
 - 現有記錄模型:`Record{kind,id,version,updated_at_ms,device_id,deleted,payload}`;space 鏈的 `host` 記錄今天是整段 Host 文字(`HostPayload{schema,text}`);帳戶 `schema_version` 超過支援的值就唯讀。
 - Windows 的 release 版是 `windows_subsystem = "windows"`,沒有 console;`GetNamedPipeClientProcessId` 已在 `agent/pipe_windows.rs` 使用。
