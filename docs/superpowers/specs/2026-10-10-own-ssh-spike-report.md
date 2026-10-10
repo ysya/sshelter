@@ -42,6 +42,8 @@
 
 ## 每個問題的結果
 
+表中「PASS(規格假設不成立,見…)」的意思是測試通過、但規格原本的說法在這裡不成立,細節在「規格裡不成立的假設」的那一列;第 20 項相反(規格的說法成立,見「核對過、沒問題」)。
+
 | # | 問題 | 結果 | 證據 |
 |---|---|---|---|
 | 1 | app 的 `ssh-key` 0.6.7 與 russh 釘的 `ssh-key` 0.7.0-rc 能在同一個 build 並存嗎? | PASS | 附錄的 `cargo tree -i ssh-key`;`coexistence` 的三個測試 |
@@ -50,18 +52,18 @@
 | 4 | sshd 真的在驗保管庫簽的東西嗎(負向對照) | PASS | `vault_signer` |
 | 5 | 只講 `ssh-rsa`(SHA-1)的舊伺服器(Review Focus 1) | PASS(測試斷言的是現狀:預設設定連得上、用 SHA-1 簽。這正是引擎要擋掉的,見規格表 §6.3 一列);russh 給的 hash_alg:None;線上演算法:ssh-rsa | `vault_signer` |
 | 6 | exec:結束碼、stdout、stderr | PASS | `exec` |
-| 7 | exec:被訊號殺掉(Review Focus 3) | PASS;exit_status = None,exit_signal = Some("KILL") | `exec` |
+| 7 | exec:被訊號殺掉(Review Focus 3) | PASS(規格假設不成立,見「規格裡不成立的假設」的 §7.1 `exec_result` 一列);exit_status = None,exit_signal = Some("KILL") | `exec` |
 | 8 | exec:很長的輸出(Review Focus 5) | PASS(150.4 MiB/s,loopback、debug build,只說明 32 MiB 不會卡住,不是效能數字);讀到上限就關 channel,連線仍可用:PASS(下一個 exec 8 ms) | `exec` |
 | 9 | exec 的逾時 | PASS:russh 沒有指令逾時,引擎自己用 `tokio::time::timeout` 加 `Channel::close`,連線之後仍可用 | `exec` |
 | 10 | shell:PTY、提示、指令、結束碼 | PASS;第一個提示在 163 ms 內出現 | `shell` |
-| 11 | shell:視窗大小(開 PTY 時給的、執行中改的、shell 就緒前改的:Review Focus 4) | PASS;連 PTY 都還沒有就送 window-change:最後大小 24 80,保留了嗎:false | `shell` |
+| 11 | shell:視窗大小(開 PTY 時給的、執行中改的、shell 就緒前改的:Review Focus 4) | PASS(規格假設不成立,見「規格裡不成立的假設」的 §7.3 視窗大小一列);連 PTY 都還沒有就送 window-change:最後大小 24 80,保留了嗎:false | `shell` |
 | 12 | 密碼與 keyboard-interactive | 拒絕的路徑:PASS;`none` 認證列出的方法:MethodSet([PublicKey])。**成功的路徑沒有驗證:scratch sshd 沒有 PAM,要在真實主機上測** | `auth_methods` |
 | 13 | 主機金鑰:接受、拒絕、釘住、比對 | PASS;被拒時 russh 回的錯誤:UnknownKey | `host_key` |
 | 14 | 主機金鑰確認要等人:等得了嗎 | PASS(規格假設不成立,見「規格裡不成立的假設」的 §6.2 第 3 步一列);答案比伺服器的 `LoginGraceTime` 慢(3 秒的寬限、6 秒後才答。**這份 log 是伺服器恰好沒有切斷連線的那一種結果;同一個觀察在本任務的 17 次執行裡,13 次是連線已死、4 次沒被切斷(含這一次),是競態,見本表下方「第 14 項的細節」**):connect 回 connected,緊接著的第一次呼叫 Ok(Failure { remaining_methods: MethodSet([PublicKey]), partial_success: false }),200 ms 後 Ok(Failure { remaining_methods: MethodSet([PublicKey]), partial_success: false }),登入 Success,handler 記到的斷線 None(對照組、預設寬限時間:第一次呼叫 Ok(Failure { remaining_methods: MethodSet([PublicKey]), partial_success: false }),登入 Success);等答案時連線被切斷,第一次呼叫的面貌(51 回合):{"empty_failure": 17, "inconsistent": 3, "recv_error": 17, "send_error": 14},之後 `is_closed()`:{true: 51},`Handle` future:{"Err(IO(Custom { kind: UnexpectedEof, error: \"early eof\" }))": 50, "Err(IO(Os { code: 54, kind: ConnectionReset, message: \"Connection reset by peer\" }))": 1};sshd 真正掉線的時間(`LoginGraceTime 1`,秒):3.61 s、3.05 s、1.71 s、1.40 s、2.65 s | `host_key` |
 | 15 | 沒有共同的主機金鑰演算法(Review Focus 2) | PASS;錯誤:NoCommonAlgo { kind: Key, ours: ["rsa-sha2-256"], theirs: ["ssh-ed25519"] } | `host_key` |
-| 16 | keepalive | PASS:interval 1 秒、max 2,3044 ms 後察覺,原因 Error(KeepaliveTimeout);有回應的連線不會被關:PASS | `keepalive` |
-| 17 | 連線在指令執行中被切斷(Review Focus 3) | PASS:0 ms 內結束,原因 Error(IO(Custom { kind: UnexpectedEof, error: "early eof" })) | `keepalive` |
-| 18 | 握手一直沒有回應 | PASS:russh 的 `Config` 沒有連線或握手逾時,`connect` 沒有上限(測試在我們自己的 2 秒逾時取消它) | `keepalive` |
+| 16 | keepalive | PASS(規格假設不成立,見「規格裡不成立的假設」的 §6.2 第 5 步一列):interval 1 秒、max 2,3044 ms 後察覺,原因 Error(KeepaliveTimeout);有回應的連線不會被關:PASS | `keepalive` |
+| 17 | 連線在指令執行中被切斷(Review Focus 3) | PASS(規格假設不成立,見「規格裡不成立的假設」的 §7.1 `exec_result` 一列):0 ms 內結束,原因 Error(IO(Custom { kind: UnexpectedEof, error: "early eof" })) | `keepalive` |
+| 18 | 握手一直沒有回應 | PASS(規格假設不成立,見「規格裡不成立的假設」的 §6.2 第 2 步(連線逾時)一列):russh 的 `Config` 沒有連線或握手逾時,`connect` 沒有上限(測試在我們自己的 2 秒逾時取消它) | `keepalive` |
 | 19 | 兩層跳板(direct-tcpip → `into_stream` → `connect_stream`) | PASS(規格假設不成立,見「規格裡不成立的假設」的 §6.2 第 2 步(跳板)一列);連到沒人聽的埠:ChannelOpenFailure(ConnectFailed);關掉第一跳後,第二跳的 `Handle` future:Err(IO(Custom { kind: BrokenPipe, error: "channel closed" }))、`is_closed()`:true、handler 的 `disconnected`:None(外層先沒了的這種情況——`disconnect()` 關掉第一跳、切斷第一跳底下的 TCP,兩種都量了——russh 沒有替內層跳板呼叫它;原因要看外層自己的紀錄:Error(Disconnect));內層自己先結束、外層還活著的情況沒有量 | `jump` |
 | 20 | 每個 channel 都有讀取工作 | PASS(規格的紀律成立,沒有假設被推翻:沒人讀的 channel 旁邊的 exec 8 秒內沒有回應,與 §6.3 的說法相符,見「核對過、沒問題」第一項);沒人讀的 channel 旁邊的 exec 在 8 秒內回應了嗎:false(之後開始讀,該 channel 在 3 秒內收到 498892800 bytes;旁邊的 exec 是否因此恢復沒有量) | `channels` |
 | 21 | `ipc/` 搬移(不改行為) | `ipc::` 與 `agent::` 共列 168 tests, 0 benchmarks;lib 測試(跳過兩個要用 Keychain 的測試 `secrets::tests::round_trip_set_get_delete`、`askpass::tests::env_secret_takes_priority_over_keychain`,所以是 2 filtered out):test result: ok. 1417 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 97.23s(搬移前 `agent::` 單獨是 167 個〔Task 5 報告〕,多出來的 1 個是 `ipc/` 的守門測試,沒有任何測試消失;最終審查後的修正輪把守門測試改成掃整個 `ipc/` 目錄,名稱與測試數不變:重跑 `ipc::` 與 `agent::` 仍是 168 個、lib 測試(跳過同樣兩個)仍是 1417 passed,而下面 Windows 的執行跑的是改之前的守門測試,新版在 Windows 上還沒跑過);`ipc/peer.rs`、`ipc/pipe_windows.rs`、`ipc/server.rs` 與 `sync/slot_files_windows.rs`(含測試程式碼)用 `x86_64-pc-windows-msvc` 在本機型別檢查通過,故意弄錯會被抓到;`agent/` 自己的 `cfg(windows)` 幾行(`mod.rs`、`oneshot.rs`、`openssh_tests.rs`)不在這個本機檢查裡,只靠閱讀,由下面 Windows 的實際執行補上;`test-windows.yml` 的過濾加了 `ipc::`。**搬移後的測試已在 Windows 上實際跑過**:run 38059199511(`windows key slots`,`workflow_dispatch`,headSha 8e68ade,新過濾 `sync::slot_rules sync::slot_files vault:: ipc:: agent::`)`test result: ok. 217 passed; 0 failed; 0 ignored; 0 measured; 1139 filtered out; finished in 12.21s`,其中 28 個是 `ipc::` 測試;比搬移前的基準(run 38056602396,headSha d6d9017,舊過濾,216 passed)正好多一個守門測試、沒有測試消失,見「Windows」一節 | 計畫 Task 5;`git log` 裡的 `refactor(ipc)`;`gh run view 38059199511`(搬移後)、`gh run view 38056602396`(搬移前的基準) |
