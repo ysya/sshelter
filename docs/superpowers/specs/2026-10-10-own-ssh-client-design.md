@@ -156,7 +156,7 @@ trait AuthSource {
 ### 6.3 紀律與限制
 
 - 每個 channel 都有專屬的讀取工作(russh 已知:沒人讀的 channel 會卡住整條連線,維護者拒絕修改)。
-- 演算法用 russh 預設(mlkem768x25519、curve25519-sha256、chacha20-poly1305、aes-gcm、rsa-sha2、strict-kex);第一版不提供舊演算法。
+- 演算法用 russh 預設(mlkem768x25519、curve25519-sha256、chacha20-poly1305、aes-gcm、rsa-sha2、strict-kex),但把 `ssh-rsa`(SHA-1)從主機金鑰與簽章演算法清單拿掉(russh 的預設清單含它;2026-10-10 起草第 0 期計畫時發現);第一版不提供舊演算法,只給 rsa-sha2-256/512 的主機就連不上,錯誤訊息說明原因。
 - 不支援 sk-* 金鑰;不做 agent forwarding。
 - 版本釘死 `=0.64.x`;升版是獨立的任務,要跑整合測試。
 - 待試驗(第 13 節第 0 期):ssh-key 0.6.7(保管庫)與 russh 釘的 ssh-key 0.7.0-rc 並存;Windows 實機連線;`Signer` 接 `Material::sign` 的簽章格式。
@@ -282,11 +282,11 @@ Connect 按鈕、指令面板、托盤的快速連線:沿用 `connect.rs` 的 `d
 
 ## 15. 查證紀錄(2026-10-10)
 
-- russh 0.64.1(2026-10-05);2026 年 182 個 commit、58 個 open issues、實質單一維護者;MSRV 1.89;tokio 硬相依;預設 aws-lc-rs;釘 `ssh-key =0.7.0-rc.11`、`rsa =0.10.0-rc.18`;`authenticate_publickey_with(user, PublicKey, hash_alg, &mut impl Signer)` 的 `Signer::auth_sign` 收待簽緩衝區、回傳附加 SSH 編碼簽章;`check_server_key` 預設全拒;預設協商 ed25519、ecdsa、rsa-sha2-512/256、ssh-rsa,不含 sk-*;channel 提供 PTY、`window_change`、shell、exec、subsystem、direct-tcpip、`tcpip_forward`、keepalive;ProxyJump 無內建,用 direct-tcpip + `connect_stream`;Windows 只有 CI 建置、測試只跑 Linux;2026 年 19 則 GHSA(多為對端觸發的 DoS/panic),RustSec 2026-0154 已修;沒人讀的 channel 會卡住連線(PR 730 被拒)。
+- russh 0.64.1(2026-10-05);2026 年 182 個 commit、58 個 open issues、實質單一維護者;MSRV 1.89;tokio 硬相依;預設 aws-lc-rs;釘 `ssh-key =0.7.0-rc.11`、`rsa =0.10.0-rc.18`;`authenticate_publickey_with(user, PublicKey, hash_alg, &mut impl Signer)` 的 `Signer::auth_sign(&AgentIdentity, Vec<u8>)` 收待簽緩衝區,要回傳「原緩衝區 + u32 長度 + 簽章 blob」(docs.rs 2026-10-10,fetch 後以編譯器確認);`check_server_key` 預設全拒;預設協商 ed25519、ecdsa、rsa-sha2-512/256、ssh-rsa,不含 sk-*;channel 提供 PTY、`window_change`、shell、exec、subsystem、direct-tcpip、`tcpip_forward`、keepalive;ProxyJump 無內建,用 direct-tcpip + `connect_stream`;Windows 只有 CI 建置、測試只跑 Linux;2026 年 19 則 GHSA(多為對端觸發的 DoS/panic),RustSec 2026-0154 已修;沒人讀的 channel 會卡住連線(PR 730 被拒)。
 - russh-sftp 3.0.1(2026-09-28),SFTP v3,之後用。
 - `ssh2`(libssh2 綁定)0.9.6:C 相依、同步 API、文件無自訂簽章、libssh2 正式版停在 2024-10、2026 年有 client 端 CVE;不採用。
 - 保管庫的 `vault/material.rs` `Material::sign(data, flags)` 可對任意位元組簽章(Ed25519、ECDSA、RSA),可當 `AuthSource::sign` 的實作。
-- lib crate 名稱是 `sshelter_lib`(crate-type 含 rlib,可用路徑相依),但 `lib.rs` 的 `mod vault` 不是 `pub`:試驗要開放可見性或在試驗 crate 裡複製簽章那段。`tokio 1.52`、`aws-lc-rs 1.18`、`ring 0.17`、`rustls 0.23` 已在 app 的 Cargo.lock 裡,russh 的預設不會帶進新的加密堆疊;待驗證的只剩 `ssh-key` 兩個版本並存。
+- lib crate 名稱是 `sshelter_lib`(crate-type 含 rlib,可用路徑相依),但 `lib.rs` 的 `mod vault` 不是 `pub`:試驗要開放可見性或在試驗 crate 裡複製簽章那段。`tokio 1.52`、`aws-lc-rs 1.18`、`ring 0.17`、`rustls 0.23` 已在 app 的 Cargo.lock 裡,所以 TLS 那一層不會多一套;但 russh 會帶進第二組 RustCrypto 的 rc 版本(`ssh-key 0.7.0-rc.11`、`rsa 0.10.0-rc.18` 等),和 app 現用的 `ssh-key 0.6.7`、`rsa 0.9` 並存,第 0 期要驗證編譯與執行都沒問題。
 - 同步引擎是阻塞式執行緒(`reqwest::blocking` 不能跑在 tokio 上),所以連線 runtime 要分開。
 - 現有記錄模型:`Record{kind,id,version,updated_at_ms,device_id,deleted,payload}`;space 鏈的 `host` 記錄今天是整段 Host 文字(`HostPayload{schema,text}`);帳戶 `schema_version` 超過支援的值就唯讀。
 - Windows 的 release 版是 `windows_subsystem = "windows"`,沒有 console;`GetNamedPipeClientProcessId` 已在 `agent/pipe_windows.rs` 使用。
