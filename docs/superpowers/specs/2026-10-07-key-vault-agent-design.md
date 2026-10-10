@@ -2,8 +2,8 @@
 
 - 日期:2026-10-07
 - 狀態:已核准(2026-10-07 修訂:金鑰一律在 SSHelter、Keychain 的排版、計畫 2 切成 2a 與 2b)。計畫 1、2a 已完成
-- 2026-10-10:第 0 節「用系統的 `ssh`、由 agent 提供金鑰」的前提被 `2026-10-10-own-ssh-client-design.md`(自有 SSH 用戶端,新主版本 1.0)取代;本文件描述的 0.17 系列照常維護,§5、§6、§8、§9 在 1.0 不再適用。
   (beta 0.17.0-6、0.17.0-7);2b、3 待做
+- 2026-10-10:第 0 節「用系統的 `ssh`、由 agent 提供金鑰」的前提被 `2026-10-10-own-ssh-client-design.md`(自有 SSH 用戶端,新主版本 1.0)取代;本文件描述的 0.17 系列照常維護,§5、§6、§8、§9 在 1.0 不再適用。
 - 前置:SP3 金鑰插槽(`docs/superpowers/specs/2026-10-05-sp3-key-slots-design.md`,已在 beta 0.17.0-5)
 - 調查:`docs/superpowers/specs/2026-10-07-key-vault-research.md`(金鑰管理與 agent 核准)、
   `docs/superpowers/specs/2026-10-07-key-approval-scope-research.md`(核准設定放在哪裡)
