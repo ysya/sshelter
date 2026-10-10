@@ -22,7 +22,7 @@
 - 四個條件都過:兩代 `ssh-key` 並存且互認(第 1 項);保管庫簽的三種金鑰被真的 sshd 接受、錯的金鑰被拒(第 3、4 項);exec、PTY shell、主機金鑰、keepalive、兩層跳板在臨時 sshd 上的行為都量到了(第 6 到 20 項);russh 連得上 Windows runner 的 OpenSSH server、登入、exec(「Windows」一節)。
 - 「規格裡不成立的假設」沒有一列推翻設計,它們是實作必須遵守的合約。影響最大的三個:主機金鑰確認期間連線可能已經死了,引擎要看連線自己的存活狀態、不能看錯誤種類,並在釘住之後重連(第 14 項);拒絕 SHA-1 的 RSA 登入簽章是引擎自己的檢查,不是 russh 的設定(第 5 項);內層跳板的斷線原因只能從外層取得(第 19 項)。
 - 代價:把 russh 加進 app,`Cargo.lock` 多 92 個套件、3 個預覽版,`zeroize` 被強制升到 1.9.1(第 2 項)。
-- 還沒做完的(不在上面四個條件裡,第 1 期的計畫要排進去):搬移後的 `ipc::` 測試還沒在 Windows 上跑過(第 21 項;要先 push 307307a);密碼與 keyboard-interactive 的成功路徑、Windows 的 PTY、Linux、app 本身加上 russh 之後的 Windows build(「沒驗證到的」)。
+- 還沒做完的(不在上面四個條件裡,第 1 期的計畫要排進去):密碼與 keyboard-interactive 的成功路徑、Windows 的 PTY、Linux、app 本身加上 russh 之後的 Windows build(「沒驗證到的」)。
 
 ## 每個問題的結果
 
@@ -48,7 +48,7 @@
 | 18 | 握手一直沒有回應 | PASS:russh 的 `Config` 沒有連線或握手逾時,`connect` 沒有上限(測試在我們自己的 2 秒逾時取消它) | `keepalive` |
 | 19 | 兩層跳板(direct-tcpip → `into_stream` → `connect_stream`) | PASS;連到沒人聽的埠:ChannelOpenFailure(ConnectFailed);關掉第一跳後,第二跳的 `Handle` future:Err(IO(Custom { kind: BrokenPipe, error: "channel closed" }))、`is_closed()`:true、handler 的 `disconnected`:None(russh 不會替內層跳板呼叫它;原因要看外層自己的紀錄:Error(Disconnect)) | `jump` |
 | 20 | 每個 channel 都有讀取工作 | PASS;沒人讀的 channel 旁邊的 exec 在 8 秒內回應了嗎:false(之後開始讀,3 秒內收到 498892800 bytes) | `channels` |
-| 21 | `ipc/` 搬移(不改行為) | `ipc::` 與 `agent::` 共列 168 tests, 0 benchmarks;整個 lib 測試:test result: ok. 1417 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 97.23s(搬移前 `agent::` 單獨是 167 個〔Task 5 報告〕,多出來的 1 個是 `ipc/` 的守門測試,沒有任何測試消失);`ipc/peer.rs`、`ipc/pipe_windows.rs`、`ipc/server.rs` 與 `sync/slot_files_windows.rs`(含測試程式碼)用 `x86_64-pc-windows-msvc` 在本機型別檢查通過,故意弄錯會被抓到;`agent/` 自己的 `cfg(windows)` 幾行(`mod.rs`、`oneshot.rs`、`openssh_tests.rs`)不在這個檢查裡,只靠閱讀;`test-windows.yml` 的過濾加了 `ipc::`。**搬移後的測試還沒有在 Windows 上實際跑過**:run 38056602396(`windows key slots`,`workflow_dispatch`)跑的是遠端分支的 d6d9017,不是 307307a(搬移的 commit 還沒 push),過濾條件也還是舊的 `sync::slot_rules sync::slot_files vault:: agent::`;它的結果 `216 passed; 0 failed; 1139 filtered out` 是搬移前的基準,見「Windows」一節 | 計畫 Task 5;`git log` 裡的 `refactor(ipc)`;`gh run view 38056602396` |
+| 21 | `ipc/` 搬移(不改行為) | `ipc::` 與 `agent::` 共列 168 tests, 0 benchmarks;整個 lib 測試:test result: ok. 1417 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 97.23s(搬移前 `agent::` 單獨是 167 個〔Task 5 報告〕,多出來的 1 個是 `ipc/` 的守門測試,沒有任何測試消失);`ipc/peer.rs`、`ipc/pipe_windows.rs`、`ipc/server.rs` 與 `sync/slot_files_windows.rs`(含測試程式碼)用 `x86_64-pc-windows-msvc` 在本機型別檢查通過,故意弄錯會被抓到;`agent/` 自己的 `cfg(windows)` 幾行(`mod.rs`、`oneshot.rs`、`openssh_tests.rs`)不在這個本機檢查裡,只靠閱讀,由下面 Windows 的實際執行補上;`test-windows.yml` 的過濾加了 `ipc::`。**搬移後的測試已在 Windows 上實際跑過**:run 38059199511(`windows key slots`,`workflow_dispatch`,headSha 8e68ade,新過濾 `sync::slot_rules sync::slot_files vault:: ipc:: agent::`)`test result: ok. 217 passed; 0 failed; 0 ignored; 0 measured; 1139 filtered out; finished in 12.21s`,其中 28 個是 `ipc::` 測試;比搬移前的基準(run 38056602396,headSha d6d9017,舊過濾,216 passed)正好多一個守門測試、沒有測試消失,見「Windows」一節 | 計畫 Task 5;`git log` 裡的 `refactor(ipc)`;`gh run view 38059199511`(搬移後)、`gh run view 38056602396`(搬移前的基準) |
 | 22 | 為了試驗動到 app 的哪裡 | `src-tauri/` 只有:`lib.rs` 的 `mod vault;` 改成 `pub mod vault;`(一行;`cargo check --lib` 的警告和改之前一樣,只有原本就有的 `set_host_enabled` 那一個;副作用:`vault/` 裡沒用到的 `pub` 項目不再被死碼警告抓到,今天沒有東西被藏起來)、`lib.rs` 的 `mod ipc;`,以及第 21 項的搬移;`vault/` 一個字沒動。`.github/workflows/` 動了 `test-windows.yml`(過濾)並新增 `spike-windows.yml`;`src-tauri/Cargo.toml` 與 `Cargo.lock` 對 main 的差異:0 行 | `git diff` |
 
 ### 第 14 項的細節:答案太慢時,伺服器切不切斷連線是競態
@@ -116,7 +116,7 @@
 - Linux:這份試驗只在 macOS 跑過;RHEL/Fedora 的 crypto policy 會讓第 5 項失敗(用 `SPIKE_SKIP_SHA1=1` 略過)。
 - 長時間連線(數小時)、rekey(`Limits` 預設 1 GiB 或 3600 秒)、大量並行 channel。
 - `cargo audit` 對 russh 兩代 RustCrypto 的結果。
-- 搬移後的 `ipc::` 測試與 `agent/` 裡 `cfg(windows)` 的幾行在 Windows 上實際跑過:還沒有(第 21 項;run 38056602396 是搬移前的基準)。要先 push 307307a(由使用者決定)再跑 `test-windows.yml`。
+- (已補)搬移後的 `ipc::` 測試與 `agent/` 裡 `cfg(windows)` 的幾行在 Windows 上實際跑過:run 38059199511(headSha 8e68ade,過濾 `sync::slot_rules sync::slot_files vault:: ipc:: agent::`)`test result: ok. 217 passed; 0 failed; 0 ignored; 0 measured; 1139 filtered out; finished in 12.21s`,見第 21 項與「Windows」一節。原本列在這裡,是因為 run 38056602396 只是搬移前的基準(它跑的是 d6d9017)。
 - app 本身加上 russh 之後的 Windows build。`spike windows` 只建試驗 crate(`--no-default-features`,不含 app 函式庫);本機也沒法預先檢查,因為 `aws-lc-sys` 的 build script 需要 Windows SDK 的標頭。第 1 期把 russh 放進 `src-tauri/` 之後,第一次 Windows CI 才會知道。
 - app 自己的測試在加了 russh 的 `src-tauri/Cargo.lock` 之下的結果,尤其是用到 `zeroize` 的 `vault::`(1.8.2 → 1.9.1)。試驗只證明 app 函式庫在試驗自己的 lock 下編得過、保管庫的簽章在那個 lock 下被 sshd 接受,沒有用那份 lock 跑 app 的整個測試。
 - 沒有 `server-sig-algs` 的伺服器(很舊的 OpenSSH、老路由器):讀原始碼,`best_supported_rsa_hash()` 這時回 `Ok(None)`(client/mod.rs:767-795)。這台 sshd 一定回答 ext-info,產生不出這種伺服器,測試沒有涵蓋。
@@ -501,7 +501,8 @@ test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
 
 ### `test-windows.yml`:搬移 `ipc/` 之後的 Windows 測試
 
-- 執行:https://github.com/ysya/sshelter/actions/runs/38056602396(workflow `windows key slots`,job `slots`,事件 `workflow_dispatch`,分支 `next/own-ssh`);結論:success;`test result: ok. 216 passed; 0 failed; 0 ignored; 0 measured; 1139 filtered out; finished in 25.65s`。
-- **它跑的不是搬移後的程式。** GitHub 回報這次執行的 commit 是 d6d9017(`headSha`),也就是遠端 `next/own-ssh` 的最前面;307307a(`refactor(ipc)`)只在本機,還沒 push(截至這份報告,`git ls-remote origin refs/heads/next/own-ssh` 是 d6d9017)。log 裡執行的指令是舊的過濾 `cargo test --lib -- sync::slot_rules sync::slot_files vault:: agent::`(沒有 `ipc::`),d6d9017 裡也還沒有 `src-tauri/src/ipc/`,`server.rs`、`peer.rs`、`pipe_windows.rs` 還在 `agent/` 下。(查證:`gh run view 38056602396 --json headSha,...`、`gh run view 38056602396 --log` 的 `Run cargo test` 那一行、`git ls-tree d6d9017 -- src-tauri/src/ipc`、`git ls-remote origin refs/heads/next/own-ssh`。)
-- 所以它證明的是:搬移之前的 `agent::`(含現在在 `ipc/` 的那些測試)、`vault::`、`sync::slot_rules`、`sync::slot_files` 在 `windows-latest` 上全過——搬移前的基準。它不證明搬移後的 `ipc::` 測試,也不證明 `agent/` 裡 `cfg(windows)` 的新 import。
-- 要補的:把 307307a push 上去(由使用者決定),再跑一次 `test-windows.yml`,確認 `ipc::` 的測試出現在 `test result` 裡且全過。
+- 搬移前的基準:https://github.com/ysya/sshelter/actions/runs/38056602396(workflow `windows key slots`,job `slots`,事件 `workflow_dispatch`,分支 `next/own-ssh`);結論:success;`test result: ok. 216 passed; 0 failed; 0 ignored; 0 measured; 1139 filtered out; finished in 25.65s`。
+- **這一次跑的不是搬移後的程式。** GitHub 回報這次執行的 commit 是 d6d9017(`headSha`),也就是當時遠端 `next/own-ssh` 的最前面;307307a(`refactor(ipc)`)當時只在本機,還沒 push。log 裡執行的指令是舊的過濾 `cargo test --lib -- sync::slot_rules sync::slot_files vault:: agent::`(沒有 `ipc::`),d6d9017 裡也還沒有 `src-tauri/src/ipc/`,`server.rs`、`peer.rs`、`pipe_windows.rs` 還在 `agent/` 下。(查證:`gh run view 38056602396 --json headSha,...`、`gh run view 38056602396 --log` 的 `Run cargo test` 那一行、`git ls-tree d6d9017 -- src-tauri/src/ipc`。)
+- 所以它證明的是:搬移之前的 `agent::`(含現在在 `ipc/` 的那些測試)、`vault::`、`sync::slot_rules`、`sync::slot_files` 在 `windows-latest` 上全過——搬移前的基準。它不證明搬移後的程式。
+- 搬移後的實際執行:https://github.com/ysya/sshelter/actions/runs/38059199511(workflow `windows key slots`,job `slots`,事件 `workflow_dispatch`,分支 `next/own-ssh`,headSha **8e68ade**〔含 307307a 的搬移〕,2026-10-10T14:20:14Z 建立);結論:**success**。步驟「Key slot, vault and agent tests」執行的是新的過濾 `cargo test --lib -- sync::slot_rules sync::slot_files vault:: ipc:: agent::`,結果(逐字取自該次執行的 log):`test result: ok. 217 passed; 0 failed; 0 ignored; 0 measured; 1139 filtered out; finished in 12.21s`。
+- 217 = 搬移前基準的 216 + `ipc` 的守門測試。核對方式:把兩次 log 的測試名稱比對,基準裡的 `agent::{server,peer,pipe_windows}::` 對應成 `ipc::…` 之後,新的一次只多 `ipc::tests::the_ipc_module_does_not_reach_into_the_agent` 一個,基準的測試沒有任何一個消失;217 個全是 ok。其中 28 個是 `ipc::` 測試(`ipc::peer` 22、`ipc::pipe_windows` 5〔Windows 才有的具名管道測試〕、守門測試 1),另有 121 個 `agent::` 測試全過。所以搬移後的 `ipc::` 測試與 `agent/` 裡 `cfg(windows)` 的幾行,在 `windows-latest` 上編得過、相關測試全過。
